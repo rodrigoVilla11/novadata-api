@@ -9,6 +9,14 @@ import { ProductsModule } from './products/products.module';
 import { StockSnapshotsModule } from './stock-snapshots/stock-snapshots.module';
 import { EmployeesModule } from './employees/employees.module';
 import { AttendanceModule } from './attendance/attendance.module';
+import { TasksModule } from './tasks/tasks.module';
+import { ProductionModule } from './production/production.module';
+import { MeModule } from './me/me.module';
+import { WeeklySyncModule } from './weekly-sync/weekly-sync.module';
+import { FinanceCategoriesModule } from './finance/categories/finance-categories.module';
+import { FinanceAccountsModule } from './finance/accounts/finance-accounts.module';
+import { FinanceMovementsModule } from './finance/movements/finance-movements.module';
+import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
 
 @Module({
   imports: [
@@ -29,6 +37,14 @@ import { AttendanceModule } from './attendance/attendance.module';
     StockSnapshotsModule,
     EmployeesModule,
     AttendanceModule,
+    TasksModule,
+    ProductionModule,
+    MeModule,
+    WeeklySyncModule,
+    FinanceCategoriesModule,
+    FinanceAccountsModule,
+    FinanceMovementsModule,
+    FinanceClosingsModule,
   ],
 })
 export class AppModule {}

@@ -2,18 +2,21 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
-} from "@nestjs/common";
-import { InjectModel } from "@nestjs/mongoose";
-import { Model, Types } from "mongoose";
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
 import {
   AttendanceRecord,
   AttendanceDocument,
-} from "./schemas/attendance.schema";
+} from './schemas/attendance.schema';
+import { UpdateAttendanceDto } from './dto/update-attendance.dto';
+import { AttendanceSummaryQueryDto } from './dto/attendance-summary.dto';
+import { Employee } from 'src/employees/schemas/employee.schema';
 
 function normalizeDateKey(dateKey: string) {
   // Esperamos YYYY-MM-DD
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
-    throw new BadRequestException("dateKey inválido (usar YYYY-MM-DD)");
+    throw new BadRequestException('dateKey inválido (usar YYYY-MM-DD)');
   }
   return dateKey;
 }
@@ -22,7 +25,8 @@ function normalizeDateKey(dateKey: string) {
 export class AttendanceService {
   constructor(
     @InjectModel(AttendanceRecord.name)
-    private readonly attendanceModel: Model<AttendanceDocument>
+    private readonly attendanceModel: Model<AttendanceDocument>,
+    @InjectModel(Employee.name) private readonly employeeModel: Model<Employee>,
   ) {}
 
   private toDTO(doc: any) {
@@ -49,14 +53,15 @@ export class AttendanceService {
       .findOne({ dateKey, employeeId })
       .lean();
 
-    if (!doc) throw new NotFoundException("Asistencia no encontrada");
+    if (!doc) throw new NotFoundException('Asistencia no encontrada');
     return this.toDTO(doc);
   }
 
   async list(params?: { dateKey?: string; employeeId?: string }) {
     const filter: any = {};
     if (params?.dateKey) filter.dateKey = normalizeDateKey(params.dateKey);
-    if (params?.employeeId) filter.employeeId = new Types.ObjectId(params.employeeId);
+    if (params?.employeeId)
+      filter.employeeId = new Types.ObjectId(params.employeeId);
 
     const docs = await this.attendanceModel
       .find(filter)
@@ -115,26 +120,26 @@ export class AttendanceService {
           createdBy: input.createdByUserId
             ? new Types.ObjectId(input.createdByUserId)
             : null,
-          checkInAt: { $ifNull: ["$checkInAt", now] },
+          checkInAt: { $ifNull: ['$checkInAt', now] },
           checkInPhotoUrl:
             input.photoUrl !== undefined
               ? input.photoUrl
-              : { $ifNull: ["$checkInPhotoUrl", null] },
+              : { $ifNull: ['$checkInPhotoUrl', null] },
           notes:
             input.notes !== undefined
               ? input.notes
-              : { $ifNull: ["$notes", null] },
+              : { $ifNull: ['$notes', null] },
         },
       },
       // si no tenía checkOut, queda igual
     ];
 
     const doc = await this.attendanceModel
-      .findOneAndUpdate(
-        { dateKey, employeeId },
-        pipeline as any,
-        { upsert: true, new: true }
-      )
+      .findOneAndUpdate({ dateKey, employeeId }, pipeline as any, {
+        upsert: true,
+        new: true,
+        updatePipeline: true, // ✅ importante
+      })
       .lean();
 
     return this.toDTO(doc);
@@ -158,19 +163,21 @@ export class AttendanceService {
 
     if (!existing) {
       throw new NotFoundException(
-        "No hay check-in para este empleado en esta fecha"
+        'No hay check-in para este empleado en esta fecha',
       );
     }
     if (!existing.checkInAt) {
-      throw new BadRequestException("El registro no tiene check-in");
+      throw new BadRequestException('El registro no tiene check-in');
     }
     if (existing.checkOutAt) {
       // si querés permitir re-checkout, cambialo por update
-      throw new BadRequestException("Ya existe check-out para este día");
+      throw new BadRequestException('Ya existe check-out para este día');
     }
 
     if (now.getTime() < new Date(existing.checkInAt).getTime()) {
-      throw new BadRequestException("check-out no puede ser antes del check-in");
+      throw new BadRequestException(
+        'check-out no puede ser antes del check-in',
+      );
     }
 
     const patch: any = {
@@ -179,12 +186,158 @@ export class AttendanceService {
     };
 
     if (input.notes !== undefined) patch.notes = input.notes;
-    if (input.createdByUserId) patch.createdBy = new Types.ObjectId(input.createdByUserId);
+    if (input.createdByUserId)
+      patch.createdBy = new Types.ObjectId(input.createdByUserId);
 
     const doc = await this.attendanceModel
       .findOneAndUpdate({ dateKey, employeeId }, { $set: patch }, { new: true })
       .lean();
 
     return this.toDTO(doc);
+  }
+
+  async update(id: string, dto: UpdateAttendanceDto) {
+    const patch: any = {};
+
+    if ('checkInAt' in dto) patch.checkInAt = dto.checkInAt;
+    if ('checkOutAt' in dto) patch.checkOutAt = dto.checkOutAt;
+    if ('checkInPhotoUrl' in dto) patch.checkInPhotoUrl = dto.checkInPhotoUrl;
+    if ('checkOutPhotoUrl' in dto)
+      patch.checkOutPhotoUrl = dto.checkOutPhotoUrl;
+    if ('notes' in dto) patch.notes = dto.notes;
+
+    const doc = await this.attendanceModel
+      .findByIdAndUpdate(id, patch, { new: true })
+      .lean();
+
+    if (!doc) throw new NotFoundException('Asistencia no encontrada');
+
+    return this.toDTO(doc);
+  }
+
+  async summary(q: AttendanceSummaryQueryDto) {
+    const from = q.from;
+    const to = q.to;
+
+    const onlyActive = (q.onlyActive ?? 'true') === 'true';
+
+    const employeeMatch: any = {};
+    if (q.employeeId) employeeMatch._id = new Types.ObjectId(q.employeeId);
+    if (onlyActive) employeeMatch.isActive = true;
+
+    const pipeline: any[] = [
+      // 1) arrancamos desde EMPLOYEES para devolver "todos"
+      { $match: employeeMatch },
+
+      // 2) lookup attendance por rango y empleado
+      {
+        $lookup: {
+          from: 'attendancerecords', // 👈 nombre real de la collection de Attendance (ver nota abajo)
+          let: { empId: '$_id', hourlyRate: '$hourlyRate' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$employeeId', '$$empId'] },
+                    { $gte: ['$dateKey', from] },
+                    { $lte: ['$dateKey', to] },
+                  ],
+                },
+              },
+            },
+            // solo registros “computables”
+            {
+              $match: {
+                checkInAt: { $ne: null },
+                checkOutAt: { $ne: null },
+              },
+            },
+            // hours = max(0, (checkOutAt - checkInAt) / 3600000)
+            {
+              $addFields: {
+                _ms: { $subtract: ['$checkOutAt', '$checkInAt'] },
+              },
+            },
+            {
+              $addFields: {
+                hours: {
+                  $cond: [
+                    { $gt: ['$_ms', 0] },
+                    { $divide: ['$_ms', 1000 * 60 * 60] },
+                    0,
+                  ],
+                },
+              },
+            },
+            // pay = hours * hourlyRate (del empleado)
+            {
+              $addFields: {
+                pay: { $multiply: ['$hours', '$$hourlyRate'] },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                totalHours: { $sum: '$hours' },
+                totalPay: { $sum: '$pay' },
+                daysWorked: { $sum: 1 },
+              },
+            },
+          ],
+          as: 'agg',
+        },
+      },
+
+      // 3) aplanamos agg (si no hay, queda 0)
+      {
+        $addFields: {
+          _agg: { $ifNull: [{ $arrayElemAt: ['$agg', 0] }, null] },
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          fullName: 1,
+          hourlyRate: 1,
+          isActive: 1,
+          totalHours: { $ifNull: ['$_agg.totalHours', 0] },
+          totalPay: { $ifNull: ['$_agg.totalPay', 0] },
+          daysWorked: { $ifNull: ['$_agg.daysWorked', 0] },
+        },
+      },
+
+      // 4) orden por nombre
+      { $sort: { fullName: 1 } },
+    ];
+
+    const itemsRaw = await this.employeeModel.aggregate(pipeline);
+
+    // Totales generales
+    const totals = itemsRaw.reduce(
+      (acc, it) => {
+        acc.totalHours += Number(it.totalHours || 0);
+        acc.totalPay += Number(it.totalPay || 0);
+        return acc;
+      },
+      { totalHours: 0, totalPay: 0 },
+    );
+
+    // formato final
+    const items = itemsRaw.map((it) => ({
+      employeeId: String(it._id),
+      fullName: it.fullName,
+      hourlyRate: Number(it.hourlyRate || 0),
+      isActive: !!it.isActive,
+      totalHours: Number(it.totalHours || 0),
+      totalPay: Number(it.totalPay || 0),
+      daysWorked: Number(it.daysWorked || 0),
+    }));
+
+    return {
+      range: { from, to },
+      totals,
+      items,
+    };
   }
 }
