@@ -32,6 +32,8 @@ export class FinanceMovementsController {
     @Query('q') q?: string,
     @Query('limit') limit?: string,
     @Query('page') page?: string,
+    @Query('includeVoids') includeVoids?: string,
+    @Query('status') status?: string,
   ) {
     return this.service.findAll({
       from,
@@ -40,6 +42,8 @@ export class FinanceMovementsController {
       accountId,
       categoryId,
       q,
+      includeVoids: includeVoids === 'true',
+      status: status as 'ALL' | 'POSTED' | 'VOID' | undefined,
       limit: limit ? Number(limit) : 50,
       page: page ? Number(page) : 1,
     });

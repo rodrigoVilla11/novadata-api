@@ -134,9 +134,16 @@ export class FinanceMovementsService {
     q?: string;
     limit?: number;
     page?: number;
+    includeVoids?: boolean;
+    status?: 'ALL' | 'POSTED' | 'VOID';
   }) {
-    const filter: any = { status: { $ne: 'VOID' } };
+    const filter: any = { };
 
+    if (params.status && params.status !== 'ALL') {
+      filter.status = params.status;
+    } else if (!params.includeVoids) {
+      filter.status = { $ne: 'VOID' };
+    }
     if (params.from || params.to) {
       filter.dateKey = {};
       if (params.from) filter.dateKey.$gte = params.from;

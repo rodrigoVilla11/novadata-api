@@ -17,6 +17,7 @@ import { FinanceCategoriesModule } from './finance/categories/finance-categories
 import { FinanceAccountsModule } from './finance/accounts/finance-accounts.module';
 import { FinanceMovementsModule } from './finance/movements/finance-movements.module';
 import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
+import { FinanceStatsModule } from './finance/stats/finance-stats.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { FinanceClosingsModule } from './finance/closings/finance-closings.modul
     FinanceAccountsModule,
     FinanceMovementsModule,
     FinanceClosingsModule,
+    FinanceStatsModule
   ],
 })
 export class AppModule {}
