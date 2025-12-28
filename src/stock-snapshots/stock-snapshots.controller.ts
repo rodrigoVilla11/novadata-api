@@ -14,11 +14,11 @@ import { Roles } from '../auth/roles.decorator';
 
 @Controller('stock-snapshots')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('ADMIN')
 export class StockSnapshotsController {
   constructor(private readonly snapshots: StockSnapshotsService) {}
 
   @Get()
+  @Roles('ADMIN', "MANAGER")
   getOne(
     @Query('dateKey') dateKey: string,
     @Query('supplierId') supplierId: string,
@@ -27,6 +27,7 @@ export class StockSnapshotsController {
   }
 
   @Put()
+  @Roles('ADMIN', "MANAGER")
   upsert(
     @Body()
     body: {
