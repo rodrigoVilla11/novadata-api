@@ -10,7 +10,7 @@ import {
   Supplier,
   SupplierDocument,
 } from 'src/suppliers/schemas/supplier.schema';
-import { Ingredient } from 'src/products/schemas/ingredients.schema';
+import { Ingredient } from 'src/ingredients/schemas/ingredients.schema';
 
 function assertDateKey(dateKey: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {

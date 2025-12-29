@@ -4,7 +4,7 @@ import { StockSnapshotsController } from "./stock-snapshots.controller";
 import { StockSnapshotsService } from "./stock-snapshots.service";
 import { StockSnapshot, StockSnapshotSchema } from "./schemas/stock-snapshot.schema";
 import { Supplier, SupplierSchema } from "src/suppliers/schemas/supplier.schema";
-import { Ingredient, IngredientSchema } from "src/products/schemas/ingredients.schema";
+import { Ingredient, IngredientSchema } from "src/ingredients/schemas/ingredients.schema";
 
 @Module({
   imports: [

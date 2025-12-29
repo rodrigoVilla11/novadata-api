@@ -17,7 +17,14 @@ import { FinanceAccountsModule } from './finance/accounts/finance-accounts.modul
 import { FinanceMovementsModule } from './finance/movements/finance-movements.module';
 import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
 import { FinanceStatsModule } from './finance/stats/finance-stats.module';
-import { IngredientsModule } from './products/ingredients.module';
+import { IngredientsModule } from './ingredients/ingredients.module';
+import { PreparationsModule } from './preparations/preparations.module';
+import { ProductsModule } from './products/products.module';
+import { CategoriesModule } from './categories/categories.module';
+import { CustomersModule } from './customers/customers.module';
+import { CashModule } from './cash/cash.module';
+import { StockModule } from './stock/stock.module';
+import { RecipeModule } from './recipes/recipe.module';
 
 @Module({
   imports: [
@@ -46,7 +53,14 @@ import { IngredientsModule } from './products/ingredients.module';
     FinanceAccountsModule,
     FinanceMovementsModule,
     FinanceClosingsModule,
-    FinanceStatsModule
+    FinanceStatsModule,
+    PreparationsModule,
+    ProductsModule,
+    CategoriesModule,
+    CustomersModule,
+    CashModule,
+    StockModule,
+    RecipeModule
   ],
 })
 export class AppModule {}
