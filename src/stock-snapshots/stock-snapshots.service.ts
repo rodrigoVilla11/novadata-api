@@ -6,11 +6,11 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { StockSnapshot } from './schemas/stock-snapshot.schema';
-import { Product, ProductDocument } from 'src/products/schemas/product.schema';
 import {
   Supplier,
   SupplierDocument,
 } from 'src/suppliers/schemas/supplier.schema';
+import { Ingredient } from 'src/products/schemas/ingredients.schema';
 
 function assertDateKey(dateKey: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
@@ -38,8 +38,8 @@ export class StockSnapshotsService {
   constructor(
     @InjectModel(StockSnapshot.name)
     private snapshotModel: Model<StockSnapshot>,
-    @InjectModel(Product.name)
-    private readonly productModel: Model<ProductDocument>,
+    @InjectModel(Ingredient.name)
+    private readonly ingredientModel: Model<Ingredient>,
     @InjectModel(Supplier.name)
     private readonly supplierModel: Model<SupplierDocument>,
   ) {}
@@ -132,7 +132,7 @@ export class StockSnapshotsService {
 
     // 2) Traemos productos que tengan minQty definido (para alertas)
     // Ajustá “isActive/hidden/deleted_at” según tu schema
-    const products = await this.productModel
+    const products = await this.ingredientModel
       .find({
         // si tenés soft delete, filtralo acá
         minQty: { $ne: null },

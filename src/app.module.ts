@@ -5,7 +5,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
-import { ProductsModule } from './products/products.module';
 import { StockSnapshotsModule } from './stock-snapshots/stock-snapshots.module';
 import { EmployeesModule } from './employees/employees.module';
 import { AttendanceModule } from './attendance/attendance.module';
@@ -18,6 +17,7 @@ import { FinanceAccountsModule } from './finance/accounts/finance-accounts.modul
 import { FinanceMovementsModule } from './finance/movements/finance-movements.module';
 import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
 import { FinanceStatsModule } from './finance/stats/finance-stats.module';
+import { IngredientsModule } from './products/ingredients.module';
 
 @Module({
   imports: [
@@ -34,7 +34,7 @@ import { FinanceStatsModule } from './finance/stats/finance-stats.module';
     UsersModule,
     AuthModule,
     SuppliersModule,
-    ProductsModule,
+    IngredientsModule,
     StockSnapshotsModule,
     EmployeesModule,
     AttendanceModule,
