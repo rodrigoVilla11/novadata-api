@@ -10,9 +10,7 @@ import { Ingredient } from 'src/ingredients/schemas/ingredients.schema';
 import { Unit } from 'src/ingredients/enums/unit.enum';
 
 import { RecipeService } from 'src/recipes/recipe.service';
-import {
-  StockMovement,
-} from './schemas/stock-movement.schema';
+import { StockMovement } from './schemas/stock-movement.schema';
 import { StockMovementReason, StockMovementType } from './enums/stock.enums';
 
 function num(v: any) {
@@ -26,7 +24,6 @@ function clampNonNeg(n: number) {
 }
 
 function assertDateKey(dateKey: string) {
-  // simple yyyy-mm-dd
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey || '')) {
     throw new BadRequestException('dateKey must be YYYY-MM-DD');
   }
@@ -34,23 +31,21 @@ function assertDateKey(dateKey: string) {
 
 type ApplyMovementItem = {
   ingredientId: string;
-  qty: number; // siempre positivo en el input; el service define el signo según type
-  unit?: Unit | null; // opcional: si no viene, lo obtiene del ingredient
+  qty: number; // IN/OUT: positivo (service firma el signo). ADJUST: signed no-cero
+  unit?: Unit | null; // opcional: si no viene, se obtiene del ingrediente
   note?: string | null;
 };
 
 type ApplySaleInput = {
   dateKey: string; // YYYY-MM-DD
-  branchId?: string | null;
   saleId: string; // id de la venta (ref)
   lines: Array<{ productId: string; qty: number }>;
   note?: string | null;
-  userId?: string | null; // para auditoría
+  userId?: string | null; // auditoría
 };
 
 type ApplyManualInput = {
   dateKey: string;
-  branchId?: string | null;
 
   type: StockMovementType; // IN | OUT | ADJUST
   reason: StockMovementReason; // PURCHASE | MANUAL | WASTE | etc.
@@ -59,6 +54,14 @@ type ApplyManualInput = {
   refId?: string | null;
 
   items: ApplyMovementItem[];
+  note?: string | null;
+  userId?: string | null;
+};
+
+type ApplySaleVoidInput = {
+  dateKey: string;
+  saleId: string;
+  lines: Array<{ productId: string; qty: number }>;
   note?: string | null;
   userId?: string | null;
 };
@@ -75,34 +78,53 @@ export class StockService {
 
   /**
    * Aplica una venta (productos) => genera movimientos OUT de ingredientes automáticamente
+   * Controller manda: { dateKey, saleId, lines, note?, userId? }
    */
-  async applySale(input: ApplySaleInput) {
-    assertDateKey(input.dateKey);
+  async applySale(dto: ApplySaleInput) {
+    assertDateKey(dto.dateKey);
 
-    if (!input.saleId?.trim()) throw new BadRequestException('saleId is required');
-    if (!Array.isArray(input.lines) || input.lines.length === 0) {
+    if (!dto.saleId?.trim())
+      throw new BadRequestException('saleId is required');
+    if (!Array.isArray(dto.lines) || dto.lines.length === 0) {
       throw new BadRequestException('lines[] is required');
     }
 
-    const branchId = input.branchId ? new Types.ObjectId(input.branchId) : null;
+    // Por ahora NO usamos branchId
+    const branchId = null;
 
     // 1) Expandir cada producto a ingredientes y acumular
-    const acc = new Map<string, { ingredientId: string; unit: Unit; qty: number }>();
+    const acc = new Map<
+      string,
+      { ingredientId: string; unit: Unit; qty: number }
+    >();
 
-    for (const line of input.lines) {
+    for (const line of dto.lines) {
       const productId = String(line.productId || '').trim();
       const qty = num(line.qty);
 
-      if (!productId) throw new BadRequestException('line.productId is required');
-      if (!Number.isFinite(qty) || qty <= 0) throw new BadRequestException('line.qty must be > 0');
+      if (!productId)
+        throw new BadRequestException('line.productId is required');
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new BadRequestException('line.qty must be > 0');
+      }
 
-      const expanded = await this.recipeService.expandProductToIngredients(productId, qty);
+      const expanded = await this.recipeService.expandProductToIngredients(
+        productId,
+        qty,
+      );
 
       for (const it of expanded.items) {
         const key = `${it.ingredientId}::${it.unit}`;
         const prev = acc.get(key);
-        if (!prev) acc.set(key, { ingredientId: it.ingredientId, unit: it.unit, qty: it.qty });
-        else prev.qty += it.qty;
+        if (!prev) {
+          acc.set(key, {
+            ingredientId: it.ingredientId,
+            unit: it.unit,
+            qty: it.qty,
+          });
+        } else {
+          prev.qty += it.qty;
+        }
       }
     }
 
@@ -111,23 +133,24 @@ export class StockService {
       .filter((x) => x.qty > 0);
 
     if (!items.length) {
-      // receta vacía => no debería pasar si validaste products
-      throw new BadRequestException('No ingredient consumption computed from sale');
+      throw new BadRequestException(
+        'No ingredient consumption computed from sale',
+      );
     }
 
-    // 2) Crear movimientos OUT
+    // 2) Crear movimientos OUT (qty negativo)
     const docs = items.map((it) => ({
-      dateKey: input.dateKey,
+      dateKey: dto.dateKey,
       branchId,
       type: StockMovementType.OUT,
       reason: StockMovementReason.SALE,
       refType: 'SALE',
-      refId: input.saleId,
+      refId: dto.saleId,
       ingredientId: new Types.ObjectId(it.ingredientId),
       unit: it.unit,
-      qty: -Math.abs(num(it.qty)), // OUT negativo
-      note: input.note ?? null,
-      userId: input.userId ? String(input.userId) : null,
+      qty: -Math.abs(num(it.qty)),
+      note: dto.note ?? null,
+      userId: dto.userId ? String(dto.userId) : null,
     }));
 
     await this.movementModel.insertMany(docs);
@@ -138,7 +161,7 @@ export class StockService {
       items: items.map((x) => ({
         ingredientId: x.ingredientId,
         unit: x.unit,
-        qty: x.qty,
+        qty: x.qty, // positivo en respuesta (consumo)
       })),
     };
   }
@@ -147,7 +170,7 @@ export class StockService {
    * Aplica movimiento manual (compras, ajustes, merma, etc.)
    * - IN => qty positivo
    * - OUT => qty negativo
-   * - ADJUST => qty puede ser + o - (pero normalmente lo mandás con signo)
+   * - ADJUST => qty signed (≠ 0)
    */
   async applyManual(input: ApplyManualInput) {
     assertDateKey(input.dateKey);
@@ -158,7 +181,8 @@ export class StockService {
       throw new BadRequestException('items[] is required');
     }
 
-    const branchId = input.branchId ? new Types.ObjectId(input.branchId) : null;
+    // Por ahora NO usamos branchId
+    const branchId = null;
 
     // Si no viene unit, la sacamos del ingrediente
     const ids = input.items.map((x) => x.ingredientId).filter(Boolean);
@@ -172,32 +196,45 @@ export class StockService {
 
     const docs = input.items.map((it) => {
       const ingredientId = String(it.ingredientId || '').trim();
-      if (!ingredientId) throw new BadRequestException('ingredientId is required');
+      if (!ingredientId)
+        throw new BadRequestException('ingredientId is required');
+
+      const ing = ingById.get(ingredientId);
+      if (!ing)
+        throw new NotFoundException(`Ingredient not found: ${ingredientId}`);
+
+      const unit = (it.unit ?? ing.baseUnit ?? ing.unit ?? Unit.UNIT) as Unit;
+
+      if (input.type === StockMovementType.ADJUST) {
+        const signed = num(it.qty);
+        if (!Number.isFinite(signed) || signed === 0) {
+          throw new BadRequestException(
+            'For ADJUST, qty must be a signed non-zero number',
+          );
+        }
+
+        return {
+          dateKey: input.dateKey,
+          branchId,
+          type: input.type,
+          reason: input.reason,
+          refType: input.refType ?? null,
+          refId: input.refId ?? null,
+          ingredientId: new Types.ObjectId(ingredientId),
+          unit,
+          qty: signed,
+          note: it.note ?? input.note ?? null,
+          userId: input.userId ? String(input.userId) : null,
+        };
+      }
 
       const qtyAbs = Math.abs(num(it.qty));
       if (!Number.isFinite(qtyAbs) || qtyAbs <= 0) {
         throw new BadRequestException('qty must be > 0');
       }
 
-      const ing = ingById.get(ingredientId);
-      if (!ing) throw new NotFoundException(`Ingredient not found: ${ingredientId}`);
-
-      const unit = (it.unit ?? ing.baseUnit ?? ing.unit ?? Unit.UNIT) as Unit;
-
-      let qtySigned = qtyAbs;
-
-      if (input.type === StockMovementType.OUT) qtySigned = -qtyAbs;
-      if (input.type === StockMovementType.IN) qtySigned = +qtyAbs;
-
-      // ADJUST: por defecto respetamos signo si el usuario mandó negativo en it.qty
-      if (input.type === StockMovementType.ADJUST) {
-        const raw = num(it.qty);
-        qtySigned = raw === 0 ? 0 : raw; // permite + o -
-        if (!Number.isFinite(qtySigned) || qtySigned === 0) {
-          // para ADJUST, forzá a que venga con signo y distinto de 0
-          throw new BadRequestException('For ADJUST, qty must be a signed non-zero number');
-        }
-      }
+      const qtySigned =
+        input.type === StockMovementType.OUT ? -qtyAbs : +qtyAbs;
 
       return {
         dateKey: input.dateKey,
@@ -215,25 +252,19 @@ export class StockService {
     });
 
     await this.movementModel.insertMany(docs);
-
     return { ok: true, created: docs.length };
   }
 
   /**
-   * Balance “actual” por ingrediente (sumando movimientos).
-   * Si pasás ingredientId => devuelve uno.
-   * Si no => devuelve listado.
+   * Balance actual por ingrediente (sumando movimientos)
+   * Sin branchId por ahora.
    */
-  async getBalances(params?: {
-    branchId?: string | null;
-    ingredientId?: string | null;
-  }) {
-    const match: any = {};
+  async getBalances(params?: { ingredientId?: string | null }) {
+    const match: any = { branchId: null };
 
-    if (params?.branchId) match.branchId = new Types.ObjectId(params.branchId);
-    else match.branchId = null; // si usás branch único como null (ajustalo si querés multi-branch)
-
-    if (params?.ingredientId) match.ingredientId = new Types.ObjectId(params.ingredientId);
+    if (params?.ingredientId) {
+      match.ingredientId = new Types.ObjectId(params.ingredientId);
+    }
 
     const agg = await this.movementModel.aggregate([
       { $match: match },
@@ -265,27 +296,25 @@ export class StockService {
   }
 
   /**
-   * Movimientos (para auditoría)
+   * Movimientos (auditoría)
+   * Sin branchId por ahora.
    */
   async listMovements(params?: {
     dateKey?: string;
-    branchId?: string | null;
     ingredientId?: string | null;
     refType?: string | null;
     refId?: string | null;
     limit?: number;
   }) {
-    const filter: any = {};
+    const filter: any = { branchId: null };
 
     if (params?.dateKey) {
       assertDateKey(params.dateKey);
       filter.dateKey = params.dateKey;
     }
 
-    if (params?.branchId) filter.branchId = new Types.ObjectId(params.branchId);
-    else filter.branchId = null;
-
-    if (params?.ingredientId) filter.ingredientId = new Types.ObjectId(params.ingredientId);
+    if (params?.ingredientId)
+      filter.ingredientId = new Types.ObjectId(params.ingredientId);
     if (params?.refType) filter.refType = String(params.refType);
     if (params?.refId) filter.refId = String(params.refId);
 
@@ -300,7 +329,7 @@ export class StockService {
     return rows.map((m: any) => ({
       id: String(m._id),
       dateKey: m.dateKey,
-      branchId: m.branchId ? String(m.branchId) : null,
+      branchId: null,
       type: m.type,
       reason: m.reason,
       refType: m.refType ?? null,
@@ -312,5 +341,79 @@ export class StockService {
       userId: m.userId ?? null,
       createdAt: m.createdAt,
     }));
+  }
+
+  async applySaleReversal(dto: {
+    dateKey: string;
+    saleId: string;
+    lines: Array<{ productId: string; qty: number }>;
+    note?: string | null;
+    userId?: string | null;
+  }) {
+    assertDateKey(dto.dateKey);
+    if (!dto.saleId?.trim())
+      throw new BadRequestException('saleId is required');
+    if (!Array.isArray(dto.lines) || dto.lines.length === 0) {
+      throw new BadRequestException('lines[] is required');
+    }
+
+    const acc = new Map<
+      string,
+      { ingredientId: string; unit: Unit; qty: number }
+    >();
+
+    for (const line of dto.lines) {
+      const productId = String(line.productId || '').trim();
+      const qty = num(line.qty);
+      if (!productId)
+        throw new BadRequestException('line.productId is required');
+      if (!Number.isFinite(qty) || qty <= 0)
+        throw new BadRequestException('line.qty must be > 0');
+
+      const expanded = await this.recipeService.expandProductToIngredients(
+        productId,
+        qty,
+      );
+
+      for (const it of expanded.items) {
+        const key = `${it.ingredientId}::${it.unit}`;
+        const prev = acc.get(key);
+        if (!prev)
+          acc.set(key, {
+            ingredientId: it.ingredientId,
+            unit: it.unit,
+            qty: it.qty,
+          });
+        else prev.qty += it.qty;
+      }
+    }
+
+    const items = Array.from(acc.values())
+      .map((x) => ({ ...x, qty: clampNonNeg(x.qty) }))
+      .filter((x) => x.qty > 0);
+
+    if (!items.length)
+      throw new BadRequestException('No ingredient restore computed');
+
+    const docs = items.map((it) => ({
+      dateKey: dto.dateKey,
+      type: StockMovementType.REVERSAL,
+      reason: StockMovementReason.SALE,
+      refType: 'SALE',
+      refId: dto.saleId,
+
+      ingredientId: new Types.ObjectId(it.ingredientId),
+      unit: it.unit,
+
+      // REVERSAL del OUT => qty positivo
+      qty: +Math.abs(num(it.qty)),
+
+      note: dto.note ?? null,
+      createdByUserId: dto.userId ? String(dto.userId) : null,
+    }));
+
+    await this.movementModel.insertMany(docs);
+
+    return { ok: true, created: docs.length };
   }
 }

@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+
 import {
   CashDay,
   CashDayDocument,
@@ -17,6 +18,7 @@ import {
   CashMovementType,
   PaymentMethod,
 } from './schemas/cash-movement.schema';
+
 import { OpenCashDayDto } from './dto/open-cash-day.dto';
 import { CloseCashDayDto } from './dto/close-cash-day.dto';
 import { CreateMovementDto } from './dto/create-movement.dto';
@@ -35,6 +37,12 @@ function toMoney(n: any) {
   return Number.isFinite(v) ? v : 0;
 }
 
+function assertDateKey(dateKey: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || '').trim())) {
+    throw new BadRequestException('dateKey must be YYYY-MM-DD');
+  }
+}
+
 @Injectable()
 export class CashService {
   constructor(
@@ -43,6 +51,10 @@ export class CashService {
     @InjectModel(CashMovement.name)
     private readonly movModel: Model<CashMovementDocument>,
   ) {}
+
+  // ============================
+  // Public mappers
+  // ============================
 
   private toCashDayPublic(d: any) {
     return {
@@ -83,8 +95,26 @@ export class CashService {
     };
   }
 
+  // ============================
+  // Day
+  // ============================
+
+  async getDayByDateKey(dateKey: string, branchId?: string) {
+    assertDateKey(dateKey);
+    const bId = branchId ? new Types.ObjectId(branchId) : null;
+
+    const day = await this.cashDayModel
+      .findOne({ dateKey, branchId: bId })
+      .lean();
+    if (!day) return null;
+
+    const rec = await this.recalcExpectedCash(String(day._id));
+    return this.toCashDayPublic(rec);
+  }
+
   // crea o trae la caja del día (1 por dateKey + branchId)
   async getOrCreateDay(user: any, dateKey: string, branchId?: string) {
+    assertDateKey(dateKey);
     const bId = branchId ? new Types.ObjectId(branchId) : null;
 
     // upsert para evitar race conditions
@@ -107,23 +137,24 @@ export class CashService {
       )
       .lean();
 
-    // recalcular expected (por si hay movimientos)
     const updated = await this.recalcExpectedCash(String(doc._id));
     return this.toCashDayPublic(updated);
   }
 
   async openDay(user: any, dto: OpenCashDayDto) {
+    assertDateKey(dto.dateKey);
     const bId = dto.branchId ? new Types.ObjectId(dto.branchId) : null;
 
     const existing = await this.cashDayModel.findOne({
       dateKey: dto.dateKey,
       branchId: bId,
     });
+
     if (existing) {
-      // si ya existe, solo permitimos setear openingCash si sigue OPEN
       if (existing.status === CashDayStatus.CLOSED) {
         throw new BadRequestException('La caja de ese día ya está cerrada.');
       }
+
       const openingCash = Math.max(0, toMoney(dto.openingCash));
       const updated = await this.cashDayModel
         .findByIdAndUpdate(
@@ -154,6 +185,7 @@ export class CashService {
   }
 
   async closeDay(user: any, dto: CloseCashDayDto) {
+    assertDateKey(dto.dateKey);
     const userId = pickUserId(user);
     const isAdmin = hasRole(user, 'ADMIN');
 
@@ -165,23 +197,21 @@ export class CashService {
     if (!day) throw new NotFoundException('Caja del día no encontrada.');
 
     if (day.status === CashDayStatus.CLOSED) {
-      // si querés permitir re-cierre solo admin, se puede
       if (!isAdmin) throw new BadRequestException('La caja ya está cerrada.');
-      // admin puede “re-cerrar” ajustando contado y nota
+      // admin puede “re-cerrar” (ajustar contado y nota)
     }
 
     // recalcular expectedCash antes de cerrar
     const rec = await this.recalcExpectedCash(String(day._id));
     const expectedCash = toMoney(rec.expectedCash);
 
-    // countedCash opcional, pero si no viene y no override -> error
     const countedCash =
       dto.countedCash === undefined || dto.countedCash === null
         ? null
         : Math.max(0, toMoney(dto.countedCash));
 
     const wantsOverride = !!dto.adminOverride;
-    if (!countedCash && !wantsOverride) {
+    if ((countedCash === null || countedCash === 0) && !wantsOverride) {
       throw new BadRequestException(
         'Falta countedCash para cerrar. (o usar adminOverride)',
       );
@@ -211,15 +241,16 @@ export class CashService {
     return this.toCashDayPublic(updated);
   }
 
-  // Admin-only (si querés reabrir caja cerrada)
   async reopenDay(
     user: any,
     dateKey: string,
     branchId?: string,
     note?: string,
   ) {
-    if (!hasRole(user, 'ADMIN'))
+    assertDateKey(dateKey);
+    if (!hasRole(user, 'ADMIN')) {
       throw new ForbiddenException('Solo ADMIN puede reabrir caja.');
+    }
 
     const bId = branchId ? new Types.ObjectId(branchId) : null;
     const day = await this.cashDayModel.findOne({ dateKey, branchId: bId });
@@ -244,6 +275,10 @@ export class CashService {
     return this.toCashDayPublic(rec);
   }
 
+  // ============================
+  // Movements
+  // ============================
+
   async listMovements(cashDayId: string) {
     const rows = await this.movModel
       .find({ cashDayId: new Types.ObjectId(cashDayId) })
@@ -256,8 +291,9 @@ export class CashService {
   async createMovement(user: any, dto: CreateMovementDto) {
     const cashDay = await this.cashDayModel.findById(dto.cashDayId);
     if (!cashDay) throw new NotFoundException('Caja no encontrada.');
-    if (cashDay.status === CashDayStatus.CLOSED)
+    if (cashDay.status === CashDayStatus.CLOSED) {
       throw new BadRequestException('La caja está cerrada.');
+    }
 
     const amount = Math.max(0, toMoney(dto.amount));
     if (amount <= 0) throw new BadRequestException('amount debe ser > 0');
@@ -275,11 +311,12 @@ export class CashService {
       concept: (dto.concept ?? '').trim(),
       note: (dto.note ?? '').trim(),
       createdByUserId: pickUserId(user),
+
+      refType: (dto as any).refType ?? null,
+      refId: (dto as any).refId ?? null,
     });
 
-    // recalcular expectedCash (solo impacta efectivo)
     await this.recalcExpectedCash(dto.cashDayId);
-
     return this.toMovPublic(doc);
   }
 
@@ -289,9 +326,11 @@ export class CashService {
 
     const cashDay = await this.cashDayModel.findById(mov.cashDayId);
     if (!cashDay) throw new NotFoundException('Caja no encontrada.');
+
     if (cashDay.status === CashDayStatus.CLOSED) {
-      if (!hasRole(user, 'ADMIN'))
+      if (!hasRole(user, 'ADMIN')) {
         throw new BadRequestException('Caja cerrada: solo ADMIN puede anular.');
+      }
     }
 
     const updated = await this.movModel
@@ -308,7 +347,6 @@ export class CashService {
       .lean();
 
     await this.recalcExpectedCash(String(cashDay._id));
-
     return this.toMovPublic(updated);
   }
 
@@ -348,15 +386,20 @@ export class CashService {
     return updated!;
   }
 
-  async getDaySummary(user: any, dateKey: string) {
-    // 1) get or create day (branchId null)
-    const dayPublic = await this.getOrCreateDay(user, dateKey, undefined);
+  // ============================
+  // Summary
+  // ============================
 
-    // 2) ensure expectedCash is up to date
+  async getDaySummary(user: any, dateKey: string, branchId?: string) {
+    assertDateKey(dateKey);
+
+    // 1) get or create day
+    const dayPublic = await this.getOrCreateDay(user, dateKey, branchId);
+
+    // 2) expectedCash up to date
     const dayId = dayPublic.id;
     const recDay = await this.recalcExpectedCash(dayId);
 
-    // 3) aggregate movements (non-voided)
     const cashDayObjectId = new Types.ObjectId(dayId);
 
     // Totales por método / tipo
@@ -405,7 +448,6 @@ export class CashService {
     );
 
     // Totales por categoría (lookup a FinanceCategory)
-    // ⚠️ Si tu colección se llama distinto, cambiá "financecategories"
     const byCategoryAgg = await this.movModel.aggregate([
       {
         $match: {
@@ -475,7 +517,6 @@ export class CashService {
       String(a.name).localeCompare(String(b.name)),
     );
 
-    // Totales globales del día (independiente del método)
     const totalIncome = byMethod.reduce(
       (acc: number, x: any) => acc + Number(x.income || 0),
       0,
@@ -486,18 +527,12 @@ export class CashService {
     );
     const net = totalIncome - totalExpense;
 
-    // Efectivo neto del día (solo CASH, útil para arqueo)
     const cashRow = byMethod.find((x: any) => x.method === PaymentMethod.CASH);
     const cashNet = cashRow ? Number(cashRow.net || 0) : 0;
 
     return {
       day: this.toCashDayPublic(recDay),
-      totals: {
-        income: totalIncome,
-        expense: totalExpense,
-        net,
-        cashNet,
-      },
+      totals: { income: totalIncome, expense: totalExpense, net, cashNet },
       byMethod,
       byCategory,
     };

@@ -1,16 +1,20 @@
-import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
-import { HydratedDocument, Types } from "mongoose";
-import { StockMovementReason, StockMovementType,  } from "../enums/stock.enums";
-import { Unit } from "src/ingredients/enums/unit.enum"; // ajustá path si es distinto
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { HydratedDocument, Types } from 'mongoose';
+import { StockMovementReason, StockMovementType } from '../enums/stock.enums';
+import { Unit } from 'src/ingredients/enums/unit.enum';
 
 export type StockMovementDocument = HydratedDocument<StockMovement>;
+
+function isFiniteNumber(v: any) {
+  return Number.isFinite(Number(v));
+}
 
 @Schema({ timestamps: true })
 export class StockMovement {
   @Prop({ required: true, index: true })
-  dateKey: string; // YYYY-MM-DD (Argentina)
+  dateKey: string; // YYYY-MM-DD
 
-  @Prop({ type: Types.ObjectId, ref: "Ingredient", required: true, index: true })
+  @Prop({ type: Types.ObjectId, ref: 'Ingredient', required: true, index: true })
   ingredientId: Types.ObjectId;
 
   @Prop({ type: String, enum: Unit, required: true })
@@ -19,21 +23,47 @@ export class StockMovement {
   @Prop({ type: String, enum: StockMovementType, required: true, index: true })
   type: StockMovementType;
 
-  // siempre positivo; el signo lo define type
-  @Prop({ type: Number, required: true, min: 0 })
+  // qty SIGNED:
+  // IN  => > 0
+  // OUT => < 0
+  // ADJUST / REVERSAL => != 0
+  @Prop({
+    type: Number,
+    required: true,
+    validate: {
+      validator: function (this: any, v: number) {
+        if (!isFiniteNumber(v)) return false;
+
+        const n = Number(v);
+        const t = this.type;
+
+        if (t === StockMovementType.IN) return n > 0;
+        if (t === StockMovementType.OUT) return n < 0;
+        if (t === StockMovementType.ADJUST) return n !== 0;
+        if (t === StockMovementType.REVERSAL) return n !== 0;
+
+        return true;
+      },
+      message: 'qty sign is invalid for movement type',
+    },
+  })
   qty: number;
 
-  @Prop({ type: String, enum: StockMovementReason, default: StockMovementReason.MANUAL, index: true })
+  @Prop({
+    type: String,
+    enum: StockMovementReason,
+    default: StockMovementReason.MANUAL,
+    index: true,
+  })
   reason: StockMovementReason;
 
-  // para linkear con órdenes/compras/etc
   @Prop({ type: String, default: null, index: true })
-  refType?: string | null; // "ORDER" | "PURCHASE" | ...
+  refType?: string | null;
 
   @Prop({ type: String, default: null, index: true })
-  refId?: string | null; // orderId, purchaseId...
+  refId?: string | null;
 
-  @Prop({ type: String, default: "" })
+  @Prop({ type: String, default: '' })
   note?: string;
 
   @Prop({ type: String, default: null, index: true })
@@ -42,12 +72,7 @@ export class StockMovement {
 
 export const StockMovementSchema = SchemaFactory.createForClass(StockMovement);
 
-// Para evitar aplicar 2 veces stock por la misma orden (si usás refType+refId)
-StockMovementSchema.index(
-  { refType: 1, refId: 1, ingredientId: 1, type: 1 },
-  { unique: false },
-);
 
-// Para búsquedas por ingrediente/fecha
 StockMovementSchema.index({ ingredientId: 1, createdAt: -1 });
 StockMovementSchema.index({ dateKey: 1, createdAt: -1 });
+StockMovementSchema.index({ refType: 1, refId: 1, ingredientId: 1, type: 1 });

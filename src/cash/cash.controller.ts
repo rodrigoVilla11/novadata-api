@@ -3,7 +3,6 @@ import {
   Controller,
   Get,
   Param,
-  Patch,
   Post,
   Query,
   Req,
@@ -11,13 +10,11 @@ import {
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from 'src/auth/roles.decorator';
+
 import { CashService } from './cash.service';
-import { GetCashDayDto } from './dto/get-cash-day.dto';
 import { OpenCashDayDto } from './dto/open-cash-day.dto';
 import { CloseCashDayDto } from './dto/close-cash-day.dto';
 import { CreateMovementDto } from './dto/create-movement.dto';
-import { VoidMovementDto } from './dto/void-movement.dto';
-import { CashDaySummaryDto } from './dto/cash-day-summary.dto';
 
 @Controller('cash')
 @UseGuards(AuthGuard('jwt'))
@@ -25,61 +22,85 @@ import { CashDaySummaryDto } from './dto/cash-day-summary.dto';
 export class CashController {
   constructor(private readonly cashService: CashService) {}
 
-  // trae o crea la caja del día (1 por dateKey)
+  // --------------------------------
+  // Day
+  // --------------------------------
+
+  // GET /cash/day?dateKey=YYYY-MM-DD&branchId=...
   @Get('day')
-  async getOrCreateDay(@Req() req: any, @Query() q: GetCashDayDto) {
-    return this.cashService.getOrCreateDay(req.user, q.dateKey, q.branchId);
+  async getDay(
+    @Query('dateKey') dateKey: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.cashService.getDayByDateKey(dateKey, branchId);
   }
 
-  // apertura explícita (setea openingCash)
+  // POST /cash/day/get-or-create
+  @Post('day/get-or-create')
+  async getOrCreate(
+    @Req() req: any,
+    @Body() body: { dateKey: string; branchId?: string },
+  ) {
+    return this.cashService.getOrCreateDay(req.user, body.dateKey, body.branchId);
+  }
+
+  // POST /cash/day/open
   @Post('day/open')
-  async open(@Req() req: any, @Body() dto: OpenCashDayDto) {
+  async openDay(@Req() req: any, @Body() dto: OpenCashDayDto) {
     return this.cashService.openDay(req.user, dto);
   }
 
-  // cierre con arqueo
+  // POST /cash/day/close
   @Post('day/close')
-  async close(@Req() req: any, @Body() dto: CloseCashDayDto) {
+  async closeDay(@Req() req: any, @Body() dto: CloseCashDayDto) {
     return this.cashService.closeDay(req.user, dto);
   }
 
-  // reabrir (ADMIN)
+  // POST /cash/day/reopen?dateKey=...&branchId=...&note=...
   @Post('day/reopen')
-  @Roles('ADMIN')
-  async reopen(
+  @Roles('ADMIN') // además del check interno
+  async reopenDay(
     @Req() req: any,
-    @Body() body: { dateKey: string; branchId?: string; note?: string },
+    @Query('dateKey') dateKey: string,
+    @Query('branchId') branchId?: string,
+    @Query('note') note?: string,
   ) {
-    return this.cashService.reopenDay(
-      req.user,
-      body.dateKey,
-      body.branchId,
-      body.note,
-    );
+    return this.cashService.reopenDay(req.user, dateKey, branchId, note);
   }
 
-  // movimientos
-  @Get('movements')
-  async listMovements(@Query('cashDayId') cashDayId: string) {
+  // GET /cash/summary?dateKey=...&branchId=...
+  @Get('summary')
+  async summary(
+    @Req() req: any,
+    @Query('dateKey') dateKey: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.cashService.getDaySummary(req.user, dateKey, branchId);
+  }
+
+  // --------------------------------
+  // Movements
+  // --------------------------------
+
+  // GET /cash/movements/:cashDayId
+  @Get('movements/:cashDayId')
+  async listMovements(@Param('cashDayId') cashDayId: string) {
     return this.cashService.listMovements(cashDayId);
   }
 
-  @Post('movements')
+  // POST /cash/movement
+  @Post('movement')
   async createMovement(@Req() req: any, @Body() dto: CreateMovementDto) {
     return this.cashService.createMovement(req.user, dto);
   }
 
-  @Patch('movements/:id/void')
+  // POST /cash/movement/:id/void
+  @Post('movement/:id/void')
   async voidMovement(
     @Req() req: any,
     @Param('id') id: string,
-    @Body() dto: VoidMovementDto,
+    @Body() body: { reason?: string },
   ) {
-    return this.cashService.voidMovement(req.user, id, dto.reason);
-  }
-
-  @Get('day/summary')
-  async summary(@Req() req: any, @Query() q: CashDaySummaryDto) {
-    return this.cashService.getDaySummary(req.user, q.dateKey);
+    return this.cashService.voidMovement(req.user, id, body?.reason);
   }
 }

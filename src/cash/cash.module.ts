@@ -1,9 +1,14 @@
-import { Module } from "@nestjs/common";
-import { MongooseModule } from "@nestjs/mongoose";
-import { CashController } from "./cash.controller";
-import { CashService } from "./cash.service";
-import { CashDay, CashDaySchema } from "./schemas/cash-day.schema";
-import { CashMovement, CashMovementSchema } from "./schemas/cash-movement.schema";
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+
+import { CashService } from './cash.service';
+import { CashController } from './cash.controller';
+
+import { CashDay, CashDaySchema } from './schemas/cash-day.schema';
+import {
+  CashMovement,
+  CashMovementSchema,
+} from './schemas/cash-movement.schema';
 
 @Module({
   imports: [
@@ -14,6 +19,6 @@ import { CashMovement, CashMovementSchema } from "./schemas/cash-movement.schema
   ],
   controllers: [CashController],
   providers: [CashService],
-  exports: [CashService],
+  exports: [CashService], 
 })
 export class CashModule {}
