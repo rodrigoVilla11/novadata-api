@@ -12,25 +12,28 @@ import { AuthGuard } from '@nestjs/passport';
 import { Roles } from 'src/auth/roles.decorator';
 
 import { OrdersService } from './orders.service';
-import { OrderStatus } from './schemas/order.schema';
+import { OrderFulfillment, OrderStatus } from './schemas/order.schema';
 
 @Controller('orders')
 @UseGuards(AuthGuard('jwt'))
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
-  /**
-   * POST /orders
-   * - POS: crea DRAFT
-   * - ONLINE: crea PENDING
-   */
   @Post()
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
   create(
     @Body()
     body: {
       source: 'POS' | 'ONLINE';
+      fulfillment?: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY';
       customerId?: string | null;
+      customerSnapshot?: {
+        name?: string | null;
+        phone?: string | null;
+        addressLine1?: string | null;
+        addressLine2?: string | null;
+        notes?: string | null;
+      } | null;
       note?: string | null;
       items?: Array<{ productId: string; qty: number; note?: string | null }>;
     },
@@ -43,6 +46,7 @@ export class OrdersController {
   findAll(
     @Query('status') status?: OrderStatus,
     @Query('source') source?: 'POS' | 'ONLINE',
+    @Query('fulfillment') fulfillment?: OrderFulfillment,
     @Query('customerId') customerId?: string,
     @Query('q') q?: string,
     @Query('limit') limit?: string,
@@ -50,6 +54,7 @@ export class OrdersController {
     return this.ordersService.findAll({
       status,
       source,
+      fulfillment,
       customerId,
       q,
       limit: limit ? Number(limit) : undefined,
@@ -62,9 +67,6 @@ export class OrdersController {
     return this.ordersService.findOne(id);
   }
 
-  /**
-   * PUT /orders/:id/items (uso PATCH por simpleza de tus patrones)
-   */
   @Patch(':id/items')
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
   setItems(
@@ -79,6 +81,37 @@ export class OrdersController {
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
   setNote(@Param('id') id: string, @Body() body: { note?: string | null }) {
     return this.ordersService.setNote(id, body.note ?? null);
+  }
+
+  // NUEVO
+  @Patch(':id/fulfillment')
+  @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
+  setFulfillment(
+    @Param('id') id: string,
+    @Body() body: { fulfillment: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY' },
+  ) {
+    return this.ordersService.setFulfillment(id, body.fulfillment);
+  }
+
+  // NUEVO
+  @Patch(':id/customer-snapshot')
+  @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
+  setCustomerSnapshot(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      customerSnapshot:
+        | {
+            name?: string | null;
+            phone?: string | null;
+            addressLine1?: string | null;
+            addressLine2?: string | null;
+            notes?: string | null;
+          }
+        | null;
+    },
+  ) {
+    return this.ordersService.setCustomerSnapshot(id, body.customerSnapshot ?? null);
   }
 
   @Post(':id/accept')

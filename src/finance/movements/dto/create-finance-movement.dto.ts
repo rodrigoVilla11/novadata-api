@@ -1,16 +1,20 @@
-import { IsEnum, IsNumber, IsOptional, IsString, MaxLength, Min } from "class-validator";
-import { FinanceMovementType } from "../schemas/finance-movement.schema";
+import { IsEnum, IsNumber, IsOptional, IsString, MaxLength, Min, IsIn } from "class-validator";
+import { FinanceMovementDirection, FinanceMovementSource } from "../schemas/finance-movement.schema";
 
 export class CreateFinanceMovementDto {
   @IsString()
-  dateKey!: string; // YYYY-MM-DD
+  dateKey!: string;
 
-  @IsEnum(FinanceMovementType)
-  type!: FinanceMovementType;
+  @IsEnum(FinanceMovementDirection)
+  direction!: FinanceMovementDirection;
 
   @IsNumber()
   @Min(0)
   amount!: number;
+
+  @IsOptional()
+  @IsIn([1, -1])
+  adjustmentSign?: 1 | -1;
 
   @IsString()
   accountId!: string;
@@ -26,6 +30,13 @@ export class CreateFinanceMovementDto {
   @IsOptional()
   @IsString()
   providerId?: string | null;
+
+  @IsOptional()
+  source?: FinanceMovementSource;
+
+  @IsOptional()
+  @IsString()
+  sourceRef?: string | null;
 
   @IsOptional()
   @IsString()

@@ -1,9 +1,21 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
-import { Model } from "mongoose";
+import { Model, Types } from "mongoose";
 import { CreateFinanceAccountDto } from "./dto/create-finance-account.dto";
 import { UpdateFinanceAccountDto } from "./dto/update-finance-account.dto";
 import { FinanceAccount, FinanceAccountDocument } from "./schemas/finance-account.schema";
+
+function normCode(code: string) {
+  const c = (code || "").trim().toLowerCase();
+  // slug simple: letras/números/_/-
+  const safe = c.replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
+  return safe;
+}
+
+function normCurrency(cur?: string) {
+  const c = (cur || "ARS").trim().toUpperCase();
+  return c || "ARS";
+}
 
 @Injectable()
 export class FinanceAccountsService {
@@ -13,28 +25,37 @@ export class FinanceAccountsService {
   ) {}
 
   async create(userId: string, dto: CreateFinanceAccountDto) {
-    const name = dto.name.trim();
+    const name = (dto.name || "").trim();
     if (!name) throw new BadRequestException("name is required");
 
-    const currency = (dto.currency || "ARS").trim().toUpperCase();
+    const code = normCode(dto.code);
+    if (!code) throw new BadRequestException("code is required");
+
+    const currency = normCurrency(dto.currency);
+
+    const createdByUserId = Types.ObjectId.isValid(userId)
+      ? new Types.ObjectId(userId)
+      : null;
 
     try {
       const created = await this.accountModel.create({
+        code,
         name,
         type: dto.type,
         currency,
         openingBalance: dto.openingBalance ?? 0,
+        requiresClosing: dto.requiresClosing ?? true,
         notes: dto.notes ?? null,
         isActive: true,
-        createdByUserId: userId || null,
+        createdByUserId,
         deletedAt: null,
       });
 
       return this.toDTO(created);
     } catch (e: any) {
-      // duplicate key
       if (String(e?.code) === "11000") {
-        throw new BadRequestException("Ya existe una cuenta con ese nombre");
+        // puede venir por name o code
+        throw new BadRequestException("Ya existe una cuenta con ese nombre o code");
       }
       throw e;
     }
@@ -50,7 +71,11 @@ export class FinanceAccountsService {
 
     if (params.q?.trim()) {
       const qq = params.q.trim();
-      filter.name = { $regex: qq.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+      const esc = qq.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      filter.$or = [
+        { name: { $regex: esc, $options: "i" } },
+        { code: { $regex: esc, $options: "i" } },
+      ];
     }
 
     const rows = await this.accountModel
@@ -72,6 +97,12 @@ export class FinanceAccountsService {
     const row = await this.accountModel.findById(id);
     if (!row || row.deletedAt) throw new NotFoundException("Cuenta no encontrada");
 
+    if (dto.code !== undefined) {
+      const code = normCode(dto.code);
+      if (!code) throw new BadRequestException("code vacío");
+      row.code = code;
+    }
+
     if (dto.name !== undefined) {
       const name = dto.name.trim();
       if (!name) throw new BadRequestException("name vacío");
@@ -80,9 +111,11 @@ export class FinanceAccountsService {
 
     if (dto.type !== undefined) row.type = dto.type;
 
-    if (dto.currency !== undefined) row.currency = dto.currency.trim().toUpperCase() || "ARS";
+    if (dto.currency !== undefined) row.currency = normCurrency(dto.currency);
 
     if (dto.openingBalance !== undefined) row.openingBalance = dto.openingBalance;
+
+    if (dto.requiresClosing !== undefined) row.requiresClosing = dto.requiresClosing;
 
     if (dto.isActive !== undefined) row.isActive = dto.isActive;
 
@@ -92,7 +125,7 @@ export class FinanceAccountsService {
       await row.save();
     } catch (e: any) {
       if (String(e?.code) === "11000") {
-        throw new BadRequestException("Ya existe una cuenta con ese nombre");
+        throw new BadRequestException("Ya existe una cuenta con ese nombre o code");
       }
       throw e;
     }
@@ -131,10 +164,12 @@ export class FinanceAccountsService {
   private toDTO(row: any) {
     return {
       id: String(row._id),
+      code: row.code,
       name: row.name,
       type: row.type,
       currency: row.currency ?? "ARS",
       openingBalance: Number(row.openingBalance ?? 0),
+      requiresClosing: row.requiresClosing ?? true,
       isActive: !!row.isActive,
       notes: row.notes ?? null,
       createdByUserId: row.createdByUserId ?? null,

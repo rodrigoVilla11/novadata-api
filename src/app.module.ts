@@ -12,11 +12,6 @@ import { TasksModule } from './tasks/tasks.module';
 import { ProductionModule } from './production/production.module';
 import { MeModule } from './me/me.module';
 import { WeeklySyncModule } from './weekly-sync/weekly-sync.module';
-import { FinanceCategoriesModule } from './finance/categories/finance-categories.module';
-import { FinanceAccountsModule } from './finance/accounts/finance-accounts.module';
-import { FinanceMovementsModule } from './finance/movements/finance-movements.module';
-import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
-import { FinanceStatsModule } from './finance/stats/finance-stats.module';
 import { IngredientsModule } from './ingredients/ingredients.module';
 import { PreparationsModule } from './preparations/preparations.module';
 import { ProductsModule } from './products/products.module';
@@ -28,6 +23,11 @@ import { RecipeModule } from './recipes/recipe.module';
 import { OrdersModule } from './orders/orders.module';
 import { SalesModule } from './sales/sales.module';
 import { PosModule } from './pos/pos.module';
+import { FinanceMovementsModule } from './finance/movements/finance-movements.module';
+import { FinanceAccountsModule } from './finance/accounts/finance-accounts.module';
+import { FinanceCategoriesModule } from './finance/categories/finance-categories.module';
+import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
+import { FinanceStatsModule } from './finance/stats/finance-stats.module';
 
 @Module({
   imports: [
@@ -52,11 +52,6 @@ import { PosModule } from './pos/pos.module';
     ProductionModule,
     MeModule,
     WeeklySyncModule,
-    FinanceCategoriesModule,
-    FinanceAccountsModule,
-    FinanceMovementsModule,
-    FinanceClosingsModule,
-    FinanceStatsModule,
     PreparationsModule,
     ProductsModule,
     CategoriesModule,
@@ -66,7 +61,12 @@ import { PosModule } from './pos/pos.module';
     RecipeModule,
     OrdersModule,
     SalesModule,
-    PosModule
+    PosModule,
+    FinanceMovementsModule,
+    FinanceAccountsModule,
+    FinanceCategoriesModule,
+    FinanceClosingsModule,
+    FinanceStatsModule
   ],
 })
 export class AppModule {}

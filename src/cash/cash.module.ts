@@ -9,13 +9,19 @@ import {
   CashMovement,
   CashMovementSchema,
 } from './schemas/cash-movement.schema';
+import { FinanceMovement, FinanceMovementSchema } from 'src/finance/movements/schemas/finance-movement.schema';
+import { FinanceDayClosing, FinanceDayClosingSchema } from 'src/finance/closings/schemas/finance-day-closing.schema';
+import { FinanceAccountsModule } from 'src/finance/accounts/finance-accounts.module';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: CashDay.name, schema: CashDaySchema },
       { name: CashMovement.name, schema: CashMovementSchema },
+      { name: FinanceMovement.name, schema: FinanceMovementSchema },
+      { name: FinanceDayClosing.name, schema: FinanceDayClosingSchema },
     ]),
+    FinanceAccountsModule
   ],
   controllers: [CashController],
   providers: [CashService],

@@ -1,17 +1,22 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model, Types } from "mongoose";
-import { FinanceAccountsService } from "../accounts/finance-accounts.service";
-import {
-  FinanceDayClosing,
-  FinanceDayClosingDocument,
-} from "./schemas/finance-day-closing.schema";
-import { UpsertDayClosingDto } from "./dto/upsert-day-closing.dto";
-import { FinanceMovement, FinanceMovementDocument, FinanceMovementType } from "../movements/schemas/finance-movement.schema";
-import { InjectModel as InjectModel2 } from "@nestjs/mongoose";
 
-function isValidDateKey(s: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+import { FinanceAccountsService } from "../accounts/finance-accounts.service";
+import { FinanceDayClosing, FinanceDayClosingDocument } from "./schemas/finance-day-closing.schema";
+import { UpsertDayClosingDto } from "./dto/upsert-day-closing.dto";
+
+import {
+  FinanceMovement,
+  FinanceMovementDocument,
+  FinanceMovementDirection,
+  FinanceMovementType,
+} from "../movements/schemas/finance-movement.schema";
+
+function assertDateKey(s: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s || "")) {
+    throw new BadRequestException("dateKey inválido (YYYY-MM-DD)");
+  }
 }
 
 @Injectable()
@@ -20,11 +25,9 @@ export class FinanceClosingsService {
     @InjectModel(FinanceDayClosing.name)
     private readonly closingModel: Model<FinanceDayClosingDocument>,
 
-    // Movements
-    @InjectModel2(FinanceMovement.name)
+    @InjectModel(FinanceMovement.name)
     private readonly movementModel: Model<FinanceMovementDocument>,
 
-    // Accounts (para traer openingBalance y lista de cuentas)
     private readonly accountsService: FinanceAccountsService,
   ) {}
 
@@ -34,7 +37,6 @@ export class FinanceClosingsService {
   }
 
   private normBalances(input: Array<{ accountId: string; balance: number }>) {
-    // dedupe por accountId (si el front manda repetidos)
     const map = new Map<string, number>();
     for (const r of input || []) {
       const k = String(r.accountId);
@@ -45,7 +47,8 @@ export class FinanceClosingsService {
   }
 
   async getOrCreate(dateKey: string, userId?: string) {
-    if (!isValidDateKey(dateKey)) throw new BadRequestException("dateKey inválido");
+    assertDateKey(dateKey);
+
     let row = await this.closingModel.findOne({ dateKey });
     if (!row) {
       row = await this.closingModel.create({
@@ -55,7 +58,8 @@ export class FinanceClosingsService {
         computedBalances: [],
         diffBalances: [],
         notes: null,
-        createdByUserId: userId && Types.ObjectId.isValid(userId) ? new Types.ObjectId(userId) : null,
+        createdByUserId:
+          userId && Types.ObjectId.isValid(userId) ? new Types.ObjectId(userId) : null,
         submittedByUserId: null,
         lockedByUserId: null,
         submittedAt: null,
@@ -66,12 +70,14 @@ export class FinanceClosingsService {
   }
 
   async getOne(dateKey: string) {
+    assertDateKey(dateKey);
     const row = await this.closingModel.findOne({ dateKey }).lean();
     if (!row) throw new NotFoundException("Cierre no encontrado");
     return this.toDTO(row);
   }
 
   async upsertDeclared(dateKey: string, userId: string, dto: UpsertDayClosingDto) {
+    assertDateKey(dateKey);
     const closing = await this.getOrCreate(dateKey, userId);
 
     if (closing.status === "LOCKED") {
@@ -92,28 +98,29 @@ export class FinanceClosingsService {
   }
 
   async submit(dateKey: string, userId: string) {
+    assertDateKey(dateKey);
     const closing = await this.getOrCreate(dateKey, userId);
 
     if (closing.status === "LOCKED") {
       throw new BadRequestException("El cierre está LOCKED y no se puede enviar");
     }
 
+    // 1) computed usando ledger (incluye openingBalance)
     const computed = await this.computeBalancesUpTo(dateKey);
 
-    // computed map
     const computedMap = new Map<string, number>();
     for (const c of computed) computedMap.set(String(c.accountId), c.balance);
 
-    // declared map
     const declaredMap = new Map<string, number>();
     for (const d of closing.declaredBalances || []) {
       declaredMap.set(String(d.accountId), Number(d.balance ?? 0));
     }
 
-    // diffs solo para cuentas declaradas (así no te obliga a declarar todas)
+    // diffs: solo para cuentas declaradas (mantenemos tu regla)
     const diffs: Array<{ accountId: Types.ObjectId; balance: number }> = [];
     for (const [accIdStr, declaredBal] of declaredMap.entries()) {
       const comp = computedMap.get(accIdStr) ?? 0;
+      if (!Types.ObjectId.isValid(accIdStr)) continue;
       diffs.push({ accountId: new Types.ObjectId(accIdStr), balance: declaredBal - comp });
     }
 
@@ -133,6 +140,7 @@ export class FinanceClosingsService {
   }
 
   async lock(dateKey: string, adminUserId: string) {
+    assertDateKey(dateKey);
     const closing = await this.getOrCreate(dateKey, adminUserId);
 
     if (closing.status !== "SUBMITTED") {
@@ -148,29 +156,45 @@ export class FinanceClosingsService {
   }
 
   /**
-   * Calcula saldo final computado por cuenta hasta dateKey inclusive.
-   * Fórmula:
-   * openingBalance + Σ incomes - Σ expenses + Σ transfersIn - Σ transfersOut
+   * Calcula saldos por cuenta hasta dateKey inclusive:
+   * openingBalance + Σ signedMovement
    *
-   * Nota: solo considera movimientos status != VOID.
+   * signedMovement:
+   * - direction IN  => +amount
+   * - direction OUT => -amount
+   * - direction ADJUSTMENT => adjustmentSign * amount (default +)
+   *
+   * TRANSFER:
+   * - Si tu sistema ya guarda 2 asientos (OUT e IN), entra natural por direction.
+   * - Si todavía existe data legacy con type=TRANSFER + toAccountId, aplicamos fallback.
    */
   async computeBalancesUpTo(dateKey: string): Promise<Array<{ accountId: Types.ObjectId; balance: number }>> {
-    // Traigo cuentas activas (y también inactivas si querés seguir trackeando):
-    // para caja conviene incluir todas las que existan (aunque estén inactive)
-    const accounts = await this.accountsService.findAll({ active: undefined as any, includeDeleted: false } as any);
+    assertDateKey(dateKey);
 
-    // base map con openingBalance
+    // Traemos cuentas (incluye requiresClosing)
+    const accounts = await this.accountsService.findAll({
+      active: undefined as any,
+      includeDeleted: false,
+      q: undefined,
+      type: undefined as any,
+    } as any);
+
+    // Base con openingBalance
     const baseMap = new Map<string, number>();
+    const requiresClosingMap = new Map<string, boolean>();
+
     for (const a of accounts) {
       baseMap.set(a.id, Number(a.openingBalance ?? 0));
+      requiresClosingMap.set(a.id, a.requiresClosing ?? true);
     }
 
-    // aggregate movements hasta dateKey inclusive
-    const rows = await this.movementModel.aggregate([
+    // Aggregate ledger moderno: agrupar por accountId
+    const aggModern = await this.movementModel.aggregate([
       {
         $match: {
           status: { $ne: "VOID" },
           dateKey: { $lte: dateKey },
+          // usa direction si existe; si no existe (legacy), igual pasa y lo cubrimos luego
         },
       },
       {
@@ -178,42 +202,88 @@ export class FinanceClosingsService {
           accountId: 1,
           toAccountId: 1,
           type: 1,
+          direction: 1,
           amount: 1,
+          adjustmentSign: 1,
+        },
+      },
+      {
+        $addFields: {
+          signed: {
+            $switch: {
+              branches: [
+                { case: { $eq: ["$direction", FinanceMovementDirection.IN] }, then: "$amount" },
+                {
+                  case: { $eq: ["$direction", FinanceMovementDirection.OUT] },
+                  then: { $multiply: ["$amount", -1] },
+                },
+                {
+                  case: { $eq: ["$direction", FinanceMovementDirection.ADJUSTMENT] },
+                  then: { $multiply: ["$amount", { $ifNull: ["$adjustmentSign", 1] }] },
+                },
+              ],
+              default: null, // legacy or missing direction
+            },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$accountId",
+          sumSigned: { $sum: { $ifNull: ["$signed", 0] } },
+          legacyTransfers: {
+            $push: {
+              type: "$type",
+              amount: "$amount",
+              toAccountId: "$toAccountId",
+              direction: "$direction",
+            },
+          },
         },
       },
     ]);
 
-    // acumular
-    for (const r of rows) {
-      const type: FinanceMovementType = r.type;
-      const amount = Number(r.amount ?? 0);
-
-      const accId = r.accountId ? String(r.accountId) : null;
-      const toId = r.toAccountId ? String(r.toAccountId) : null;
-
+    // Aplicar sumas modernas
+    for (const r of aggModern) {
+      const accId = r._id ? String(r._id) : null;
       if (!accId) continue;
-
-      // ensure keys exist
       if (!baseMap.has(accId)) baseMap.set(accId, 0);
-      if (toId && !baseMap.has(toId)) baseMap.set(toId, 0);
+      baseMap.set(accId, (baseMap.get(accId) ?? 0) + Number(r.sumSigned ?? 0));
+    }
 
-      if (type === "INCOME") {
-        baseMap.set(accId, (baseMap.get(accId) ?? 0) + amount);
-      } else if (type === "EXPENSE") {
-        baseMap.set(accId, (baseMap.get(accId) ?? 0) - amount);
-      } else if (type === "TRANSFER") {
-        // out
-        baseMap.set(accId, (baseMap.get(accId) ?? 0) - amount);
-        // in
-        if (toId) baseMap.set(toId, (baseMap.get(toId) ?? 0) + amount);
+    // Fallback legacy transfers: type=TRANSFER con toAccountId (solo si faltaba direction)
+    // Esto evita doble conteo: solo aplica si direction es null/undefined en ese doc.
+    // Como en aggregation agrupamos, tenemos que recorrer legacyTransfers.
+    for (const r of aggModern) {
+      const fromId = r._id ? String(r._id) : null;
+      if (!fromId) continue;
+
+      const legacy = Array.isArray(r.legacyTransfers) ? r.legacyTransfers : [];
+      for (const m of legacy) {
+        if (m?.type !== FinanceMovementType.TRANSFER) continue;
+        if (m?.direction) continue; // si ya tiene direction, NO es legacy
+        const amt = Number(m.amount ?? 0);
+        const toId = m.toAccountId ? String(m.toAccountId) : null;
+
+        // salida
+        baseMap.set(fromId, (baseMap.get(fromId) ?? 0) - amt);
+        // entrada
+        if (toId) {
+          if (!baseMap.has(toId)) baseMap.set(toId, 0);
+          baseMap.set(toId, (baseMap.get(toId) ?? 0) + amt);
+        }
       }
     }
 
-    // devolver balances ordenados por cuenta (tipo + nombre) usando accounts list
+    // 🔑 Importante: por defecto, para cierre usamos solo requiresClosing=true
+    // (pero si el cashier declaró una cuenta no-arqueable, igual aparece en diffs por declaredBalances)
     const result: Array<{ accountId: Types.ObjectId; balance: number }> = [];
-
     for (const [id, bal] of baseMap.entries()) {
       if (!Types.ObjectId.isValid(id)) continue;
+
+      const req = requiresClosingMap.get(id);
+      if (req === false) continue;
+
       result.push({ accountId: new Types.ObjectId(id), balance: Number(bal ?? 0) });
     }
 

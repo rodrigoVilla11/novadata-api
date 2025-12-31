@@ -6,7 +6,7 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 
-import { Order, OrderStatus } from './schemas/order.schema';
+import { Order, OrderFulfillment, OrderStatus } from './schemas/order.schema';
 import { Product } from 'src/products/schemas/product.schema';
 
 function num(v: any) {
@@ -18,6 +18,20 @@ function assertId(id: string, name = 'id') {
   const s = String(id || '').trim();
   if (!s) throw new BadRequestException(`${name} is required`);
   return s;
+}
+
+function pickFulfillment(v: any): OrderFulfillment {
+  const s = String(v || '').toUpperCase();
+  if (s === 'DINE_IN') return OrderFulfillment.DINE_IN;
+  if (s === 'DELIVERY') return OrderFulfillment.DELIVERY;
+  if (s === 'TAKEAWAY') return OrderFulfillment.TAKEAWAY;
+  // default razonable POS: takeaway
+  return OrderFulfillment.TAKEAWAY;
+}
+
+function cleanStr(v: any) {
+  const s = String(v ?? '').trim();
+  return s ? s : null;
 }
 
 @Injectable()
@@ -33,12 +47,20 @@ export class OrdersService {
 
   async create(input: {
     source: 'POS' | 'ONLINE';
+    fulfillment?: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY';
     customerId?: string | null;
+    customerSnapshot?: {
+      name?: string | null;
+      phone?: string | null;
+      addressLine1?: string | null;
+      addressLine2?: string | null;
+      notes?: string | null;
+    } | null;
     note?: string | null;
-    // opcional: podés crear con items directo (ONLINE suele hacer esto)
     items?: Array<{ productId: string; qty: number; note?: string | null }>;
   }) {
     const source = input.source === 'ONLINE' ? 'ONLINE' : 'POS';
+    const fulfillment = pickFulfillment(input.fulfillment);
 
     const customerId = input.customerId
       ? new Types.ObjectId(input.customerId)
@@ -54,10 +76,33 @@ export class OrdersService {
 
     const totals = this.computeTotals(items);
 
+    const snapshot = input.customerSnapshot
+      ? {
+          name: cleanStr(input.customerSnapshot.name),
+          phone: cleanStr(input.customerSnapshot.phone),
+          addressLine1: cleanStr(input.customerSnapshot.addressLine1),
+          addressLine2: cleanStr(input.customerSnapshot.addressLine2),
+          notes: cleanStr(input.customerSnapshot.notes),
+        }
+      : null;
+
+    // Regla simple: si es DELIVERY y no hay customerId, pedimos al menos nombre o dirección
+    if (fulfillment === OrderFulfillment.DELIVERY && !customerId) {
+      const hasSome =
+        !!snapshot?.name || !!snapshot?.phone || !!snapshot?.addressLine1;
+      if (!hasSome) {
+        throw new BadRequestException(
+          'DELIVERY requires customerSnapshot (name/phone/address) when no customerId is provided',
+        );
+      }
+    }
+
     const doc = await this.orderModel.create({
       status: initialStatus,
       source,
+      fulfillment,
       customerId,
+      customerSnapshot: snapshot,
       note: input.note ?? null,
       items,
       ...totals,
@@ -73,20 +118,22 @@ export class OrdersService {
   async findAll(params?: {
     status?: OrderStatus;
     source?: 'POS' | 'ONLINE';
+    fulfillment?: OrderFulfillment;
     customerId?: string;
-    q?: string; // por ahora: busca por id (simple)
+    q?: string;
     limit?: number;
   }) {
     const filter: any = {};
 
     if (params?.status) filter.status = params.status;
     if (params?.source) filter.source = params.source;
+    if (params?.fulfillment) filter.fulfillment = params.fulfillment;
+
     if (params?.customerId)
       filter.customerId = new Types.ObjectId(params.customerId);
 
     if (params?.q?.trim()) {
       const q = params.q.trim();
-      // simple: match por ObjectId string
       filter.$or = [{ _id: q }];
     }
 
@@ -104,6 +151,78 @@ export class OrdersService {
   async findOne(id: string) {
     const doc = await this.orderModel.findById(id).lean();
     if (!doc) throw new NotFoundException('Order not found');
+    return this.toDto(doc);
+  }
+
+  // ============================
+  // Edit fulfillment / customer snapshot (solo DRAFT o PENDING)
+  // ============================
+
+  async setFulfillment(
+    orderId: string,
+    fulfillment: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY',
+  ) {
+    assertId(orderId, 'orderId');
+    const doc = await this.orderModel.findById(orderId);
+    if (!doc) throw new NotFoundException('Order not found');
+
+    if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
+      throw new BadRequestException(
+        `Cannot edit fulfillment when status is ${doc.status}`,
+      );
+    }
+
+    doc.fulfillment = pickFulfillment(fulfillment);
+    await doc.save();
+    return this.toDto(doc);
+  }
+
+  async setCustomerSnapshot(
+    orderId: string,
+    customerSnapshot: {
+      name?: string | null;
+      phone?: string | null;
+      addressLine1?: string | null;
+      addressLine2?: string | null;
+      notes?: string | null;
+    } | null,
+  ) {
+    assertId(orderId, 'orderId');
+    const doc = await this.orderModel.findById(orderId);
+    if (!doc) throw new NotFoundException('Order not found');
+
+    if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
+      throw new BadRequestException(
+        `Cannot edit customerSnapshot when status is ${doc.status}`,
+      );
+    }
+
+    if (!customerSnapshot) {
+      doc.customerSnapshot = null;
+      await doc.save();
+      return this.toDto(doc);
+    }
+
+    doc.customerSnapshot = {
+      name: cleanStr(customerSnapshot.name),
+      phone: cleanStr(customerSnapshot.phone),
+      addressLine1: cleanStr(customerSnapshot.addressLine1),
+      addressLine2: cleanStr(customerSnapshot.addressLine2),
+      notes: cleanStr(customerSnapshot.notes),
+    } as any;
+
+    // si queda en DELIVERY sin customerId, chequeo mínimo
+    if (doc.fulfillment === OrderFulfillment.DELIVERY && !doc.customerId) {
+      const s = doc.customerSnapshot as any;
+      const hasSome = !!s?.name || !!s?.phone || !!s?.addressLine1;
+      if (!hasSome) {
+        throw new BadRequestException(
+          'DELIVERY requires customerSnapshot (name/phone/address) when no customerId is provided',
+        );
+      }
+    }
+
+    await doc.save();
     return this.toDto(doc);
   }
 
@@ -166,6 +285,17 @@ export class OrdersService {
     }
     if (!doc.items?.length) throw new BadRequestException('Order has no items');
 
+    // Si es delivery y no hay customerId, exigimos snapshot mínimo
+    if (doc.fulfillment === OrderFulfillment.DELIVERY && !doc.customerId) {
+      const s: any = doc.customerSnapshot;
+      const hasSome = !!s?.name || !!s?.phone || !!s?.addressLine1;
+      if (!hasSome) {
+        throw new BadRequestException(
+          'DELIVERY requires customerSnapshot (name/phone/address) before accept',
+        );
+      }
+    }
+
     doc.status = OrderStatus.ACCEPTED;
     doc.acceptedAt = new Date();
     doc.rejectionReason = null;
@@ -209,17 +339,15 @@ export class OrdersService {
   // Internals
   // ============================
 
-  /**
-   * Arma items con unitPrice snapshot usando Product.salePrice
-   * fallback: Product.computed?.suggestedPrice
-   */
   private async buildItemsFromProductIds(
     rawItems: Array<{ productId: string; qty: number; note?: string | null }>,
   ) {
     if (!rawItems.length) return [];
 
-    // normalizar + merge por productId
-    const merged = new Map<string, { productId: string; qty: number; note?: string | null }>();
+    const merged = new Map<
+      string,
+      { productId: string; qty: number; note?: string | null }
+    >();
 
     for (const it of rawItems) {
       const productId = assertId(it.productId, 'productId');
@@ -232,7 +360,9 @@ export class OrdersService {
       else prev.qty += qty;
     }
 
-    const ids = Array.from(merged.values()).map((x) => new Types.ObjectId(x.productId));
+    const ids = Array.from(merged.values()).map(
+      (x) => new Types.ObjectId(x.productId),
+    );
     const products = await this.productModel
       .find({ _id: { $in: ids }, isActive: { $ne: false } })
       .select({ name: 1, salePrice: 1, computed: 1 })
@@ -248,7 +378,8 @@ export class OrdersService {
       if (!p) throw new BadRequestException(`Product not found/active: ${it.productId}`);
 
       const salePrice = p.salePrice != null ? num(p.salePrice) : null;
-      const suggested = p?.computed?.suggestedPrice != null ? num(p.computed.suggestedPrice) : null;
+      const suggested =
+        p?.computed?.suggestedPrice != null ? num(p.computed.suggestedPrice) : null;
 
       const unitPrice = salePrice ?? suggested ?? 0;
       if (!Number.isFinite(unitPrice) || unitPrice < 0) {
@@ -272,7 +403,7 @@ export class OrdersService {
 
   private computeTotals(items: any[]) {
     const subtotal = items.reduce((acc, it) => acc + num(it.lineTotal), 0);
-    const total = subtotal; // por ahora sin impuestos/desc
+    const total = subtotal;
     return { subtotal, total };
   }
 
@@ -281,7 +412,11 @@ export class OrdersService {
       id: String(doc._id ?? doc.id),
       status: doc.status,
       source: doc.source,
+      fulfillment: doc.fulfillment,
+
       customerId: doc.customerId ? String(doc.customerId) : null,
+      customerSnapshot: doc.customerSnapshot ?? null,
+
       note: doc.note ?? null,
       rejectionReason: doc.rejectionReason ?? null,
 

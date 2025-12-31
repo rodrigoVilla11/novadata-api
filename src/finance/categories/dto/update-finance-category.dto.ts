@@ -1,7 +1,12 @@
 import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, MaxLength, Min } from "class-validator";
-import { FinanceCategoryType } from "../schemas/finance-category.schema";
+import { FinanceCategoryDirection, FinanceCategoryType } from "../schemas/finance-category.schema";
 
 export class UpdateFinanceCategoryDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  code?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(80)
@@ -10,6 +15,10 @@ export class UpdateFinanceCategoryDto {
   @IsOptional()
   @IsEnum(FinanceCategoryType)
   type?: FinanceCategoryType;
+
+  @IsOptional()
+  @IsEnum(FinanceCategoryDirection)
+  direction?: FinanceCategoryDirection;
 
   @IsOptional()
   @IsString()
@@ -23,4 +32,12 @@ export class UpdateFinanceCategoryDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  affectsProfit?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  includeInStats?: boolean;
 }

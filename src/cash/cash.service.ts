@@ -3,44 +3,52 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+} from "@nestjs/common";
+import { InjectModel } from "@nestjs/mongoose";
+import { Model, Types } from "mongoose";
 
-import {
-  CashDay,
-  CashDayDocument,
-  CashDayStatus,
-} from './schemas/cash-day.schema';
+import { CashDay, CashDayDocument, CashDayStatus } from "./schemas/cash-day.schema";
 import {
   CashMovement,
   CashMovementDocument,
   CashMovementType,
   PaymentMethod,
-} from './schemas/cash-movement.schema';
+} from "./schemas/cash-movement.schema";
 
-import { OpenCashDayDto } from './dto/open-cash-day.dto';
-import { CloseCashDayDto } from './dto/close-cash-day.dto';
-import { CreateMovementDto } from './dto/create-movement.dto';
+import { OpenCashDayDto } from "./dto/open-cash-day.dto";
+import { CloseCashDayDto } from "./dto/close-cash-day.dto";
+import { CreateMovementDto } from "./dto/create-movement.dto";
+
+// 🔑 FINANCE
+import {
+  FinanceMovement,
+  FinanceMovementDocument,
+  FinanceMovementType as FinType,
+  FinanceMovementDirection as FinDir,
+} from "../finance/movements/schemas/finance-movement.schema";
+
+import { FinanceDayClosing, FinanceDayClosingDocument } from "../finance/closings/schemas/finance-day-closing.schema";
+import { FinanceAccountsService } from "../finance/accounts/finance-accounts.service";
 
 function pickUserId(u: any) {
-  return u?.id ?? u?._id ?? u?.userId ?? null;
+  return String(u?.id ?? u?._id ?? u?.userId ?? "");
 }
-
 function hasRole(u: any, role: string) {
   const roles = (u?.roles ?? []).map((r: any) => String(r).toUpperCase());
   return roles.includes(String(role).toUpperCase());
 }
-
 function toMoney(n: any) {
   const v = Number(n ?? 0);
   return Number.isFinite(v) ? v : 0;
 }
-
 function assertDateKey(dateKey: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || '').trim())) {
-    throw new BadRequestException('dateKey must be YYYY-MM-DD');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || "").trim())) {
+    throw new BadRequestException("dateKey must be YYYY-MM-DD");
   }
+}
+function oid(id: string, field: string) {
+  if (!Types.ObjectId.isValid(id)) throw new BadRequestException(`${field} inválido`);
+  return new Types.ObjectId(id);
 }
 
 @Injectable()
@@ -50,6 +58,15 @@ export class CashService {
     private readonly cashDayModel: Model<CashDayDocument>,
     @InjectModel(CashMovement.name)
     private readonly movModel: Model<CashMovementDocument>,
+
+    // ✅ sync con FINANCE
+    @InjectModel(FinanceMovement.name)
+    private readonly finMovModel: Model<FinanceMovementDocument>,
+
+    @InjectModel(FinanceDayClosing.name)
+    private readonly finClosingModel: Model<FinanceDayClosingDocument>,
+
+    private readonly accountsService: FinanceAccountsService,
   ) {}
 
   // ============================
@@ -70,7 +87,7 @@ export class CashService {
       diffCash: toMoney(d.diffCash),
       closedAt: d.closedAt ?? null,
       closedByUserId: d.closedByUserId ?? null,
-      closeNote: d.closeNote ?? '',
+      closeNote: d.closeNote ?? "",
       createdAt: d.createdAt,
       updatedAt: d.updatedAt,
     };
@@ -84,15 +101,65 @@ export class CashService {
       method: m.method,
       amount: toMoney(m.amount),
       categoryId: m.categoryId ? String(m.categoryId) : null,
-      concept: m.concept ?? '',
-      note: m.note ?? '',
+      concept: m.concept ?? "",
+      note: m.note ?? "",
       voided: !!m.voided,
       voidedAt: m.voidedAt ?? null,
       voidedByUserId: m.voidedByUserId ?? null,
-      voidReason: m.voidReason ?? '',
+      voidReason: m.voidReason ?? "",
+      refType: m.refType ?? null,
+      refId: m.refId ?? null,
       createdAt: m.createdAt,
       updatedAt: m.updatedAt,
     };
+  }
+
+  // ============================
+  // Reglas / helpers FINANCE
+  // ============================
+
+  /**
+   * Elegimos a qué FinanceAccount impacta cada método.
+   * Lo correcto es que lo configures en DB, pero para arrancar:
+   * - CASH => cuenta tipo CASH llamada "Efectivo" (o "Caja")
+   * - TRANSFER => BANK/WALLET "Mercado Pago"/"Banco"
+   *
+   * ✅ Mejora clave: centralizarlo acá.
+   */
+  private async resolveFinanceAccountIdForMethod(method: PaymentMethod) {
+    const accounts = await this.accountsService.findAll({
+      active: true,
+      includeDeleted: false,
+    } as any);
+
+    const byName = (name: string) =>
+      accounts.find((a: any) => String(a.name || "").toLowerCase() === name.toLowerCase());
+
+    // Ajustá estos nombres a los tuyos:
+    if (method === PaymentMethod.CASH) {
+      return (byName("Efectivo") ?? byName("Caja") ?? accounts[0])?.id;
+    }
+    if (method === PaymentMethod.TRANSFER) {
+      return (byName("Mercado Pago") ?? byName("Banco") ?? accounts[0])?.id;
+    }
+    if (method === PaymentMethod.CARD) {
+      return (byName("Tarjetas") ?? byName("Banco") ?? accounts[0])?.id;
+    }
+    return (byName("Otros") ?? accounts[0])?.id;
+  }
+
+  /**
+   * Si el día está LOCKED en finance/closings, bloqueamos CASH también,
+   * excepto ADMIN.
+   */
+  private async assertFinanceDayNotLocked(dateKey: string, user: any) {
+    const closing = await this.finClosingModel.findOne({ dateKey }).lean();
+    if (!closing) return;
+    if (closing.status === "LOCKED" && !hasRole(user, "ADMIN")) {
+      throw new BadRequestException(
+        `El día ${dateKey} está LOCKED en FINANCE. Solo ADMIN puede modificar caja.`,
+      );
+    }
   }
 
   // ============================
@@ -101,23 +168,21 @@ export class CashService {
 
   async getDayByDateKey(dateKey: string, branchId?: string) {
     assertDateKey(dateKey);
-    const bId = branchId ? new Types.ObjectId(branchId) : null;
+    const bId = branchId ? oid(branchId, "branchId") : null;
 
-    const day = await this.cashDayModel
-      .findOne({ dateKey, branchId: bId })
-      .lean();
+    const day = await this.cashDayModel.findOne({ dateKey, branchId: bId }).lean();
     if (!day) return null;
 
     const rec = await this.recalcExpectedCash(String(day._id));
     return this.toCashDayPublic(rec);
   }
 
-  // crea o trae la caja del día (1 por dateKey + branchId)
   async getOrCreateDay(user: any, dateKey: string, branchId?: string) {
     assertDateKey(dateKey);
-    const bId = branchId ? new Types.ObjectId(branchId) : null;
+    await this.assertFinanceDayNotLocked(dateKey, user);
 
-    // upsert para evitar race conditions
+    const bId = branchId ? oid(branchId, "branchId") : null;
+
     const doc = await this.cashDayModel
       .findOneAndUpdate(
         { dateKey, branchId: bId },
@@ -143,23 +208,27 @@ export class CashService {
 
   async openDay(user: any, dto: OpenCashDayDto) {
     assertDateKey(dto.dateKey);
-    const bId = dto.branchId ? new Types.ObjectId(dto.branchId) : null;
+    await this.assertFinanceDayNotLocked(dto.dateKey, user);
 
-    const existing = await this.cashDayModel.findOne({
-      dateKey: dto.dateKey,
-      branchId: bId,
-    });
+    const bId = dto.branchId ? oid(dto.branchId, "branchId") : null;
+
+    const existing = await this.cashDayModel.findOne({ dateKey: dto.dateKey, branchId: bId });
+
+    const openingCash = Math.max(0, toMoney(dto.openingCash));
 
     if (existing) {
       if (existing.status === CashDayStatus.CLOSED) {
-        throw new BadRequestException('La caja de ese día ya está cerrada.');
+        throw new BadRequestException("La caja de ese día ya está cerrada.");
       }
 
-      const openingCash = Math.max(0, toMoney(dto.openingCash));
       const updated = await this.cashDayModel
         .findByIdAndUpdate(
           existing._id,
-          { openingCash, openedAt: existing.openedAt ?? new Date() },
+          {
+            openingCash,
+            openedAt: existing.openedAt ?? new Date(),
+            openedByUserId: existing.openedByUserId ?? pickUserId(user),
+          },
           { new: true },
         )
         .lean();
@@ -168,7 +237,6 @@ export class CashService {
       return this.toCashDayPublic(rec);
     }
 
-    const openingCash = Math.max(0, toMoney(dto.openingCash));
     const doc = await this.cashDayModel.create({
       dateKey: dto.dateKey,
       branchId: bId,
@@ -186,22 +254,21 @@ export class CashService {
 
   async closeDay(user: any, dto: CloseCashDayDto) {
     assertDateKey(dto.dateKey);
-    const userId = pickUserId(user);
-    const isAdmin = hasRole(user, 'ADMIN');
 
-    const bId = dto.branchId ? new Types.ObjectId(dto.branchId) : null;
-    const day = await this.cashDayModel.findOne({
-      dateKey: dto.dateKey,
-      branchId: bId,
-    });
-    if (!day) throw new NotFoundException('Caja del día no encontrada.');
+    const userId = pickUserId(user);
+    const isAdmin = hasRole(user, "ADMIN");
+
+    await this.assertFinanceDayNotLocked(dto.dateKey, user);
+
+    const bId = dto.branchId ? oid(dto.branchId, "branchId") : null;
+    const day = await this.cashDayModel.findOne({ dateKey: dto.dateKey, branchId: bId });
+    if (!day) throw new NotFoundException("Caja del día no encontrada.");
 
     if (day.status === CashDayStatus.CLOSED) {
-      if (!isAdmin) throw new BadRequestException('La caja ya está cerrada.');
-      // admin puede “re-cerrar” (ajustar contado y nota)
+      if (!isAdmin) throw new BadRequestException("La caja ya está cerrada.");
+      // admin puede re-cerrar
     }
 
-    // recalcular expectedCash antes de cerrar
     const rec = await this.recalcExpectedCash(String(day._id));
     const expectedCash = toMoney(rec.expectedCash);
 
@@ -212,12 +279,10 @@ export class CashService {
 
     const wantsOverride = !!dto.adminOverride;
     if ((countedCash === null || countedCash === 0) && !wantsOverride) {
-      throw new BadRequestException(
-        'Falta countedCash para cerrar. (o usar adminOverride)',
-      );
+      throw new BadRequestException("Falta countedCash para cerrar. (o usar adminOverride)");
     }
     if (wantsOverride && !isAdmin) {
-      throw new ForbiddenException('Solo ADMIN puede usar adminOverride.');
+      throw new ForbiddenException("Solo ADMIN puede usar adminOverride.");
     }
 
     const diffCash = countedCash == null ? 0 : countedCash - expectedCash;
@@ -232,7 +297,7 @@ export class CashService {
           diffCash,
           closedAt: new Date(),
           closedByUserId: userId,
-          closeNote: (dto.note ?? '').trim(),
+          closeNote: (dto.note ?? "").trim(),
         },
         { new: true },
       )
@@ -241,20 +306,13 @@ export class CashService {
     return this.toCashDayPublic(updated);
   }
 
-  async reopenDay(
-    user: any,
-    dateKey: string,
-    branchId?: string,
-    note?: string,
-  ) {
+  async reopenDay(user: any, dateKey: string, branchId?: string, note?: string) {
     assertDateKey(dateKey);
-    if (!hasRole(user, 'ADMIN')) {
-      throw new ForbiddenException('Solo ADMIN puede reabrir caja.');
-    }
+    if (!hasRole(user, "ADMIN")) throw new ForbiddenException("Solo ADMIN puede reabrir caja.");
 
-    const bId = branchId ? new Types.ObjectId(branchId) : null;
+    const bId = branchId ? oid(branchId, "branchId") : null;
     const day = await this.cashDayModel.findOne({ dateKey, branchId: bId });
-    if (!day) throw new NotFoundException('Caja del día no encontrada.');
+    if (!day) throw new NotFoundException("Caja del día no encontrada.");
 
     const updated = await this.cashDayModel
       .findByIdAndUpdate(
@@ -265,7 +323,7 @@ export class CashService {
           closedByUserId: null,
           countedCash: null,
           diffCash: 0,
-          closeNote: (note ?? '').trim(),
+          closeNote: (note ?? "").trim(),
         },
         { new: true },
       )
@@ -281,57 +339,100 @@ export class CashService {
 
   async listMovements(cashDayId: string) {
     const rows = await this.movModel
-      .find({ cashDayId: new Types.ObjectId(cashDayId) })
+      .find({ cashDayId: oid(cashDayId, "cashDayId") })
       .sort({ createdAt: -1 })
       .lean();
 
     return rows.map((m) => this.toMovPublic(m));
   }
 
+  /**
+   * ✅ Mejora clave:
+   * - crea CashMovement
+   * - crea FinanceMovement espejo (source=CASH)
+   * - recalcula expectedCash (aggregate)
+   */
   async createMovement(user: any, dto: CreateMovementDto) {
-    const cashDay = await this.cashDayModel.findById(dto.cashDayId);
-    if (!cashDay) throw new NotFoundException('Caja no encontrada.');
-    if (cashDay.status === CashDayStatus.CLOSED) {
-      throw new BadRequestException('La caja está cerrada.');
-    }
+    const cashDay = await this.cashDayModel.findById(oid(dto.cashDayId, "cashDayId"));
+    if (!cashDay) throw new NotFoundException("Caja no encontrada.");
+    if (cashDay.status === CashDayStatus.CLOSED) throw new BadRequestException("La caja está cerrada.");
+
+    await this.assertFinanceDayNotLocked(cashDay.dateKey, user);
 
     const amount = Math.max(0, toMoney(dto.amount));
-    if (amount <= 0) throw new BadRequestException('amount debe ser > 0');
+    if (amount <= 0) throw new BadRequestException("amount debe ser > 0");
 
-    const categoryId = dto.categoryId
-      ? new Types.ObjectId(dto.categoryId)
-      : null;
+    const categoryId = dto.categoryId ? oid(dto.categoryId, "categoryId") : null;
 
-    const doc = await this.movModel.create({
-      cashDayId: new Types.ObjectId(dto.cashDayId),
+    const refType = (dto as any).refType ?? null;
+    const refId = (dto as any).refId ?? null;
+
+    // 1) cash movement
+    const cashMov = await this.movModel.create({
+      cashDayId: cashDay._id,
       type: dto.type,
       method: dto.method,
       amount,
       categoryId,
-      concept: (dto.concept ?? '').trim(),
-      note: (dto.note ?? '').trim(),
+      concept: (dto.concept ?? "").trim(),
+      note: (dto.note ?? "").trim(),
       createdByUserId: pickUserId(user),
-
-      refType: (dto as any).refType ?? null,
-      refId: (dto as any).refId ?? null,
+      refType,
+      refId,
     });
 
-    await this.recalcExpectedCash(dto.cashDayId);
-    return this.toMovPublic(doc);
+    // 2) finance mirror
+    // Solo impacta CASH expectedCash cuando method=CASH, pero FINANCE debe registrar todo (transfer/card/etc)
+    const finAccountId = await this.resolveFinanceAccountIdForMethod(dto.method);
+    if (!finAccountId) throw new BadRequestException("No hay FinanceAccount configurada para este método.");
+
+    const finType =
+      dto.type === CashMovementType.INCOME ? FinType.INCOME : FinType.EXPENSE;
+
+    const finDir =
+      dto.type === CashMovementType.INCOME ? FinDir.IN : FinDir.OUT;
+
+    await this.finMovModel.create({
+      dateKey: cashDay.dateKey,
+      type: finType,
+      direction: finDir,
+      amount,
+      accountId: oid(finAccountId, "accountId"),
+      categoryId: categoryId ? categoryId : null,
+      notes: `[CASH] ${dto.method} - ${dto.concept ?? ""}`.trim(),
+      createdByUserId: oid(pickUserId(user), "userId"),
+
+      // link
+      source: "CASH",
+      refType,
+      refId,
+      cashDayId: cashDay._id,
+
+      // snapshots opcionales (si ya los manejás en finance)
+      // accountNameSnapshot, categoryNameSnapshot los podés setear si querés
+    } as any);
+
+    await this.recalcExpectedCash(String(cashDay._id));
+    return this.toMovPublic(cashMov);
   }
 
+  /**
+   * ✅ Mejora clave:
+   * - void cash movement
+   * - void finance movement espejo (source=CASH + cashDayId + refType/refId o por cashMovementId)
+   */
   async voidMovement(user: any, movementId: string, reason?: string) {
-    const mov = await this.movModel.findById(movementId);
-    if (!mov) throw new NotFoundException('Movimiento no encontrado.');
+    const mov = await this.movModel.findById(oid(movementId, "movementId"));
+    if (!mov) throw new NotFoundException("Movimiento no encontrado.");
 
     const cashDay = await this.cashDayModel.findById(mov.cashDayId);
-    if (!cashDay) throw new NotFoundException('Caja no encontrada.');
+    if (!cashDay) throw new NotFoundException("Caja no encontrada.");
 
-    if (cashDay.status === CashDayStatus.CLOSED) {
-      if (!hasRole(user, 'ADMIN')) {
-        throw new BadRequestException('Caja cerrada: solo ADMIN puede anular.');
-      }
+    if (cashDay.status === CashDayStatus.CLOSED && !hasRole(user, "ADMIN")) {
+      throw new BadRequestException("Caja cerrada: solo ADMIN puede anular.");
     }
+
+    await this.assertFinanceDayNotLocked(cashDay.dateKey, user);
 
     const updated = await this.movModel
       .findByIdAndUpdate(
@@ -340,44 +441,65 @@ export class CashService {
           voided: true,
           voidedAt: new Date(),
           voidedByUserId: pickUserId(user),
-          voidReason: (reason ?? '').trim(),
+          voidReason: (reason ?? "").trim(),
         },
         { new: true },
       )
       .lean();
 
+    // void finance mirror
+    await this.finMovModel.updateMany(
+      {
+        source: "CASH",
+        cashDayId: mov.cashDayId,
+        // opcional: si querés estrictísimo, agregá cashMovementId como campo en finance
+        refType: mov.refType ?? null,
+        refId: mov.refId ?? null,
+        amount: mov.amount,
+        dateKey: cashDay.dateKey,
+        status: { $ne: "VOID" },
+      } as any,
+      { $set: { status: "VOID" } } as any,
+    );
+
     await this.recalcExpectedCash(String(cashDay._id));
     return this.toMovPublic(updated);
   }
 
-  // expectedCash = openingCash + ingresos CASH - egresos CASH (sin voided)
+  /**
+   * ✅ expectedCash = openingCash + (CASH income - CASH expense) (voided=false)
+   * ahora con AGGREGATE (no fetch rows)
+   */
   private async recalcExpectedCash(cashDayId: string) {
-    const day = await this.cashDayModel.findById(cashDayId).lean();
-    if (!day) throw new NotFoundException('Caja no encontrada.');
+    const day = await this.cashDayModel.findById(oid(cashDayId, "cashDayId")).lean();
+    if (!day) throw new NotFoundException("Caja no encontrada.");
 
-    const rows = await this.movModel
-      .find({ cashDayId: new Types.ObjectId(cashDayId), voided: false })
-      .lean();
+    const agg = await this.movModel.aggregate([
+      { $match: { cashDayId: new Types.ObjectId(cashDayId), voided: false, method: PaymentMethod.CASH } },
+      {
+        $group: {
+          _id: "$type",
+          total: { $sum: "$amount" },
+        },
+      },
+    ]);
 
-    let cashDelta = 0;
-    for (const m of rows) {
-      if (m.method !== PaymentMethod.CASH) continue;
-      const amt = toMoney(m.amount);
-      if (m.type === CashMovementType.INCOME) cashDelta += amt;
-      if (m.type === CashMovementType.EXPENSE) cashDelta -= amt;
+    let income = 0;
+    let expense = 0;
+    for (const r of agg) {
+      const t = String(r._id);
+      if (t === CashMovementType.INCOME) income = toMoney(r.total);
+      if (t === CashMovementType.EXPENSE) expense = toMoney(r.total);
     }
 
-    const expectedCash = toMoney(day.openingCash) + cashDelta;
+    const expectedCash = toMoney(day.openingCash) + income - expense;
 
     const updated = await this.cashDayModel
       .findByIdAndUpdate(
         cashDayId,
         {
           expectedCash,
-          diffCash:
-            day.countedCash == null
-              ? 0
-              : toMoney(day.countedCash) - expectedCash,
+          diffCash: day.countedCash == null ? 0 : toMoney(day.countedCash) - expectedCash,
         },
         { new: true },
       )
@@ -393,22 +515,20 @@ export class CashService {
   async getDaySummary(user: any, dateKey: string, branchId?: string) {
     assertDateKey(dateKey);
 
-    // 1) get or create day
+    // get or create
     const dayPublic = await this.getOrCreateDay(user, dateKey, branchId);
 
-    // 2) expectedCash up to date
-    const dayId = dayPublic.id;
-    const recDay = await this.recalcExpectedCash(dayId);
-
-    const cashDayObjectId = new Types.ObjectId(dayId);
+    // expectedCash up to date
+    const recDay = await this.recalcExpectedCash(dayPublic.id);
+    const cashDayObjectId = oid(dayPublic.id, "cashDayId");
 
     // Totales por método / tipo
     const byMethodAgg = await this.movModel.aggregate([
       { $match: { cashDayId: cashDayObjectId, voided: false } },
       {
         $group: {
-          _id: { method: '$method', type: '$type' },
-          total: { $sum: '$amount' },
+          _id: { method: "$method", type: "$type" },
+          total: { $sum: "$amount" },
           count: { $sum: 1 },
         },
       },
@@ -421,14 +541,7 @@ export class CashService {
       if (!method || !type) continue;
 
       if (!methodMap[method]) {
-        methodMap[method] = {
-          method,
-          income: 0,
-          expense: 0,
-          net: 0,
-          countIncome: 0,
-          countExpense: 0,
-        };
+        methodMap[method] = { method, income: 0, expense: 0, net: 0, countIncome: 0, countExpense: 0 };
       }
 
       if (type === CashMovementType.INCOME) {
@@ -439,8 +552,7 @@ export class CashService {
         methodMap[method].countExpense += Number(row.count || 0);
       }
 
-      methodMap[method].net =
-        methodMap[method].income - methodMap[method].expense;
+      methodMap[method].net = methodMap[method].income - methodMap[method].expense;
     }
 
     const byMethod = Object.values(methodMap).sort((a: any, b: any) =>
@@ -449,37 +561,25 @@ export class CashService {
 
     // Totales por categoría (lookup a FinanceCategory)
     const byCategoryAgg = await this.movModel.aggregate([
-      {
-        $match: {
-          cashDayId: cashDayObjectId,
-          voided: false,
-          categoryId: { $ne: null },
-        },
-      },
-      {
-        $group: {
-          _id: { categoryId: '$categoryId', type: '$type' },
-          total: { $sum: '$amount' },
-          count: { $sum: 1 },
-        },
-      },
+      { $match: { cashDayId: cashDayObjectId, voided: false, categoryId: { $ne: null } } },
+      { $group: { _id: { categoryId: "$categoryId", type: "$type" }, total: { $sum: "$amount" }, count: { $sum: 1 } } },
       {
         $lookup: {
-          from: 'financecategories',
-          localField: '_id.categoryId',
-          foreignField: '_id',
-          as: 'cat',
+          from: "financecategories",
+          localField: "_id.categoryId",
+          foreignField: "_id",
+          as: "cat",
         },
       },
-      { $unwind: { path: '$cat', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$cat", preserveNullAndEmptyArrays: true } },
       {
         $project: {
-          categoryId: { $toString: '$_id.categoryId' },
-          type: '$_id.type',
+          categoryId: { $toString: "$_id.categoryId" },
+          type: "$_id.type",
           total: 1,
           count: 1,
-          categoryName: '$cat.name',
-          categoryType: '$cat.type',
+          categoryName: "$cat.name",
+          categoryType: "$cat.type",
         },
       },
     ]);
@@ -492,7 +592,7 @@ export class CashService {
       if (!catMap[cid]) {
         catMap[cid] = {
           categoryId: cid,
-          name: row.categoryName ?? '—',
+          name: row.categoryName ?? "—",
           type: row.categoryType ?? null,
           income: 0,
           expense: 0,
@@ -517,14 +617,8 @@ export class CashService {
       String(a.name).localeCompare(String(b.name)),
     );
 
-    const totalIncome = byMethod.reduce(
-      (acc: number, x: any) => acc + Number(x.income || 0),
-      0,
-    );
-    const totalExpense = byMethod.reduce(
-      (acc: number, x: any) => acc + Number(x.expense || 0),
-      0,
-    );
+    const totalIncome = byMethod.reduce((acc: number, x: any) => acc + Number(x.income || 0), 0);
+    const totalExpense = byMethod.reduce((acc: number, x: any) => acc + Number(x.expense || 0), 0);
     const net = totalIncome - totalExpense;
 
     const cashRow = byMethod.find((x: any) => x.method === PaymentMethod.CASH);
