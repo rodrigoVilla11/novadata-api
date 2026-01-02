@@ -1,5 +1,5 @@
-import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
-import { HydratedDocument, Types } from "mongoose";
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { HydratedDocument, Types } from 'mongoose';
 
 export type ProductionDocument = HydratedDocument<ProductionEntry>;
 
@@ -11,11 +11,11 @@ export class ProductionEntry {
   @Prop({ type: Date, required: true, index: true })
   performedAt: Date; // fecha+hora exacta
 
-  @Prop({ type: Types.ObjectId, ref: "Employee", required: true, index: true })
+  @Prop({ type: Types.ObjectId, ref: 'Employee', required: true, index: true })
   employeeId: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: "Task", required: true, index: true })
-  taskId: Types.ObjectId;
+  @Prop({ type: Types.ObjectId, ref: 'Task', required: true, index: true })
+  taskId!: Types.ObjectId;
 
   @Prop({ type: Number, default: null, min: 0 })
   qty: number | null;
@@ -23,7 +23,7 @@ export class ProductionEntry {
   @Prop({ type: String, default: null })
   notes: string | null;
 
-  @Prop({ type: Types.ObjectId, ref: "User", required: true })
+  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
   createdBy: Types.ObjectId;
 }
 
