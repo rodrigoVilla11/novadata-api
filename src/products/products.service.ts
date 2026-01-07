@@ -3,6 +3,8 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
+  Logger,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -64,13 +66,58 @@ type CreateOrUpdateProductInput = {
 };
 
 @Injectable()
-export class ProductsService {
+export class ProductsService implements OnModuleInit {
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(
     @InjectModel(Product.name) private readonly productModel: Model<Product>,
-    @InjectModel(Ingredient.name) private readonly ingredientModel: Model<Ingredient>,
-    @InjectModel(Preparation.name) private readonly preparationModel: Model<Preparation>,
-    @InjectModel(Category.name) private readonly categoryModel: Model<Category>,
+    @InjectModel(Ingredient.name)
+    private readonly ingredientModel: Model<Ingredient>,
+    @InjectModel(Preparation.name)
+    private readonly preparationModel: Model<Preparation>,
+    @InjectModel(Category.name)
+    private readonly categoryModel: Model<Category>,
   ) {}
+
+  /**
+   * Auto-run on startup (opt-in with env var)
+   *
+   * ENV:
+   * - PRODUCTS_BOOTSTRAP_ADD_COMMON_ITEMS=1
+   * - PRODUCTS_BOOTSTRAP_DRY_RUN=1 (opcional)
+   * - PRODUCTS_BOOTSTRAP_RECOMPUTE=1 (opcional)
+   * - PRODUCTS_BOOTSTRAP_ONLY_ACTIVE=1 (opcional)
+   * - PRODUCTS_BOOTSTRAP_BRANCH_ID=... (opcional)
+   */
+  async onModuleInit() {
+    try {
+      this.logger.warn(
+        'Products bootstrap: adding common items to all products...',
+      );
+
+      const res = await this.addCommonItemsToAllProducts({
+        // poné lo que quieras por defecto:
+        onlyActive: false, // o true si querés
+        recompute: false, // o true si querés que recalculen computed
+        dryRun: false,
+        // branchId: '...'   // si querés limitar
+      });
+
+      this.logger.warn(
+        `Products bootstrap done: total=${res.total} touched=${res.touched} addedItems=${res.addedItems}`,
+      );
+    } catch (e: any) {
+      // Importante: no romper el startup
+      this.logger.error(
+        `Products bootstrap failed: ${e?.message || e}`,
+        e?.stack || undefined,
+      );
+    }
+  }
+
+  // =====================================================================
+  // Public CRUD
+  // =====================================================================
 
   async create(input: CreateOrUpdateProductInput) {
     const payload = await this.normalizeInput(input);
@@ -124,7 +171,7 @@ export class ProductsService {
     categoryId?: string;
     q?: string;
     tag?: string;
-    sellable?: boolean;
+    sellable?: boolean; 
   }) {
     const filter: any = {};
 
@@ -132,8 +179,10 @@ export class ProductsService {
     if (params?.sellable != null) filter.isSellable = !!params.sellable;
 
     if (params?.branchId) filter.branchId = new Types.ObjectId(params.branchId);
-    if (params?.supplierId) filter.supplierId = new Types.ObjectId(params.supplierId);
-    if (params?.categoryId) filter.categoryId = new Types.ObjectId(params.categoryId);
+    if (params?.supplierId)
+      filter.supplierId = new Types.ObjectId(params.supplierId);
+    if (params?.categoryId)
+      filter.categoryId = new Types.ObjectId(params.categoryId);
 
     if (params?.tag?.trim()) filter.tags = params.tag.trim().toLowerCase();
 
@@ -178,9 +227,13 @@ export class ProductsService {
       description: (doc as any).description ?? null,
 
       branchId: (doc as any).branchId ? String((doc as any).branchId) : null,
-      supplierId: (doc as any).supplierId ? String((doc as any).supplierId) : null,
+      supplierId: (doc as any).supplierId
+        ? String((doc as any).supplierId)
+        : null,
 
-      categoryId: (doc as any).categoryId ? String((doc as any).categoryId) : null,
+      categoryId: (doc as any).categoryId
+        ? String((doc as any).categoryId)
+        : null,
       categoryName: (doc as any).categoryName ?? null,
 
       sku: (doc as any).sku ?? null,
@@ -225,6 +278,103 @@ export class ProductsService {
   }
 
   // =====================================================================
+  // Bootstrap: Common items bulk add
+  // =====================================================================
+
+  private readonly COMMON_ITEMS_TO_ADD = [
+    {
+      type: ProductItemType.INGREDIENT,
+      ingredientId: new Types.ObjectId('69583e73062c62fe0ec759ab'),
+      preparationId: null,
+      qty: 1,
+      note: null,
+    },
+    {
+      type: ProductItemType.INGREDIENT,
+      ingredientId: new Types.ObjectId('69583e73062c62fe0ec759b4'),
+      preparationId: null,
+      qty: 1,
+      note: null,
+    },
+    {
+      type: ProductItemType.INGREDIENT,
+      ingredientId: new Types.ObjectId('69583e73062c62fe0ec759aa'),
+      preparationId: null,
+      qty: 1,
+      note: null,
+    },
+    {
+      type: ProductItemType.INGREDIENT,
+      ingredientId: new Types.ObjectId('69583e73062c62fe0ec759c3'),
+      preparationId: null,
+      qty: 1,
+      note: null,
+    },
+  ] as const;
+
+  private itemKey(it: any) {
+    if (it?.type === ProductItemType.INGREDIENT)
+      return `I:${String(it.ingredientId)}`;
+    if (it?.type === ProductItemType.PREPARATION)
+      return `P:${String(it.preparationId)}`;
+    return `?:${String(it?.type)}`;
+  }
+
+  async addCommonItemsToAllProducts(opts?: {
+    onlyActive?: boolean;
+    branchId?: string;
+    recompute?: boolean;
+    dryRun?: boolean;
+  }) {
+    const filter: any = {};
+    if (opts?.onlyActive) filter.isActive = true;
+    if (opts?.branchId) filter.branchId = new Types.ObjectId(opts.branchId);
+
+    const cursor = this.productModel
+      .find(filter, { items: 1, name: 1 })
+      .cursor();
+
+    let total = 0;
+    let touched = 0;
+    let addedItems = 0;
+
+    for await (const p of cursor as any) {
+      total++;
+
+      const items = Array.isArray(p.items) ? p.items : [];
+      const seen = new Set(items.map((x: any) => this.itemKey(x)));
+
+      const toAdd = this.COMMON_ITEMS_TO_ADD.filter(
+        (x) => !seen.has(this.itemKey(x)),
+      );
+      if (!toAdd.length) continue;
+
+      touched++;
+      addedItems += toAdd.length;
+
+      if (opts?.dryRun) continue;
+
+      await this.productModel.updateOne(
+        { _id: p._id },
+        { $push: { items: { $each: toAdd } } },
+      );
+
+      if (opts?.recompute) {
+        await this.recompute(String(p._id));
+      }
+    }
+
+    return {
+      ok: true,
+      total,
+      touched,
+      addedItems,
+      dryRun: !!opts?.dryRun,
+      recompute: !!opts?.recompute,
+    };
+  }
+
+  // =====================================================================
   // Normalize + Category integration
   // =====================================================================
 
@@ -249,7 +399,9 @@ export class ProductsService {
       input.marginPct == null ? null : this.clamp01(this.num(input.marginPct));
 
     const branchId = input.branchId ? new Types.ObjectId(input.branchId) : null;
-    const supplierId = input.supplierId ? new Types.ObjectId(input.supplierId) : null;
+    const supplierId = input.supplierId
+      ? new Types.ObjectId(input.supplierId)
+      : null;
 
     const sku = input.sku ? String(input.sku).trim() : null;
     const barcode = input.barcode ? String(input.barcode).trim() : null;
@@ -258,8 +410,12 @@ export class ProductsService {
     const isProduced = input.isProduced ?? true;
 
     const portionSize =
-      input.portionSize == null ? null : Math.max(0, this.num(input.portionSize));
-    const portionLabel = input.portionLabel ? String(input.portionLabel).trim() : null;
+      input.portionSize == null
+        ? null
+        : Math.max(0, this.num(input.portionSize));
+    const portionLabel = input.portionLabel
+      ? String(input.portionLabel).trim()
+      : null;
 
     const tags = (input.tags ?? [])
       .map((t) => String(t || '').trim())
@@ -274,10 +430,13 @@ export class ProductsService {
       .filter(Boolean);
 
     const items = (input.items ?? []).map((it) => {
-      const type = (it.type as any) as ProductItemType;
+      const type = it.type as any as ProductItemType;
       const qty = this.num(it.qty);
 
-      if (type !== ProductItemType.INGREDIENT && type !== ProductItemType.PREPARATION) {
+      if (
+        type !== ProductItemType.INGREDIENT &&
+        type !== ProductItemType.PREPARATION
+      ) {
         throw new BadRequestException('Invalid item type');
       }
       if (!Number.isFinite(qty) || qty <= 0) {
@@ -299,10 +458,14 @@ export class ProductsService {
           : null;
 
       if (type === ProductItemType.INGREDIENT && !ingredientId) {
-        throw new BadRequestException('ingredientId is required for INGREDIENT item');
+        throw new BadRequestException(
+          'ingredientId is required for INGREDIENT item',
+        );
       }
       if (type === ProductItemType.PREPARATION && !preparationId) {
-        throw new BadRequestException('preparationId is required for PREPARATION item');
+        throw new BadRequestException(
+          'preparationId is required for PREPARATION item',
+        );
       }
 
       return {
@@ -321,11 +484,13 @@ export class ProductsService {
         it.type === ProductItemType.INGREDIENT
           ? `I:${String(it.ingredientId)}`
           : `P:${String(it.preparationId)}`;
-      if (seen.has(key)) throw new BadRequestException('Duplicated item in items[]');
+      if (seen.has(key))
+        throw new BadRequestException('Duplicated item in items[]');
       seen.add(key);
     }
 
-    if (!items.length) throw new BadRequestException('At least 1 item is required');
+    if (!items.length)
+      throw new BadRequestException('At least 1 item is required');
 
     // -----------------------
     // Category: validate + hydrate categoryName
@@ -345,7 +510,9 @@ export class ProductsService {
 
       // regla simple: si el producto tiene branchId, y la categoría tiene branchId,
       // deben coincidir (si querés permitir global->branch, se ajusta)
-      const catBranch = (cat as any).branchId ? String((cat as any).branchId) : null;
+      const catBranch = (cat as any).branchId
+        ? String((cat as any).branchId)
+        : null;
       const prodBranch = branchId ? String(branchId) : null;
 
       if (catBranch && prodBranch && catBranch !== prodBranch) {
@@ -462,20 +629,25 @@ export class ProductsService {
     const packagingCost = Math.max(0, this.num(payload.packagingCost ?? 0));
     const yieldQty = Math.max(0.000001, this.num(payload.yieldQty ?? 1));
 
-    const totalCost = ingredientsCost * (1 + wastePct) + extraCost + packagingCost;
+    const totalCost =
+      ingredientsCost * (1 + wastePct) + extraCost + packagingCost;
     const unitCost = totalCost / yieldQty;
 
     const salePrice =
-      payload.salePrice == null ? null : Math.max(0, this.num(payload.salePrice));
+      payload.salePrice == null
+        ? null
+        : Math.max(0, this.num(payload.salePrice));
     const marginPct =
-      payload.marginPct == null ? null : this.clamp01(this.num(payload.marginPct));
+      payload.marginPct == null
+        ? null
+        : this.clamp01(this.num(payload.marginPct));
 
     const suggestedPrice =
       salePrice != null
         ? null
         : marginPct != null
-        ? unitCost * (1 + marginPct)
-        : null;
+          ? unitCost * (1 + marginPct)
+          : null;
 
     const marginPctUsed = salePrice == null ? marginPct : null;
 
@@ -556,7 +728,8 @@ export class ProductsService {
         suggestedPrice: doc?.computed?.suggestedPrice ?? null,
         marginPctUsed: doc?.computed?.marginPctUsed ?? null,
         grossMarginPct: doc?.computed?.grossMarginPct ?? null,
-        currency: doc?.computed?.currency || (doc.currency as Currency) || 'ARS',
+        currency:
+          doc?.computed?.currency || (doc.currency as Currency) || 'ARS',
         computedAt: doc?.computed?.computedAt ?? null,
       },
 

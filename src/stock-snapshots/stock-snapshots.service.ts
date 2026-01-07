@@ -220,4 +220,31 @@ export class StockSnapshotsService {
 
     return alerts;
   }
+
+  async getMany(params: { dateKey: string; supplierId?: string }) {
+    assertDateKey(params.dateKey);
+
+    const filter: any = { dateKey: params.dateKey };
+
+    if (params.supplierId?.trim()) {
+      filter.supplierId = new Types.ObjectId(params.supplierId.trim());
+    }
+
+    const docs = await this.snapshotModel
+      .find(filter)
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .lean();
+
+    return (docs ?? []).map((doc: any) => ({
+      id: String(doc._id),
+      dateKey: doc.dateKey,
+      supplierId: String(doc.supplierId),
+      items: (doc.items || []).map((it: any) => ({
+        productId: String(it.productId),
+        qty: Number(it.qty),
+      })),
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+    }));
+  }
 }

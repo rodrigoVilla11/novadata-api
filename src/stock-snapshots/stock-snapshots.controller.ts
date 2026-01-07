@@ -18,7 +18,7 @@ export class StockSnapshotsController {
   constructor(private readonly snapshots: StockSnapshotsService) {}
 
   @Get()
-  @Roles('ADMIN', "MANAGER")
+  @Roles('ADMIN', 'MANAGER')
   getOne(
     @Query('dateKey') dateKey: string,
     @Query('supplierId') supplierId: string,
@@ -27,7 +27,7 @@ export class StockSnapshotsController {
   }
 
   @Put()
-  @Roles('ADMIN', "MANAGER")
+  @Roles('ADMIN', 'MANAGER')
   upsert(
     @Body()
     body: {
@@ -48,5 +48,16 @@ export class StockSnapshotsController {
     return this.snapshots.getAlerts({
       dateKey: dateKey?.trim(),
     });
+  }
+  @Get()
+  @Roles('ADMIN', 'MANAGER')
+  get(
+    @Query('dateKey') dateKey: string,
+    @Query('supplierId') supplierId?: string,
+  ) {
+    if (supplierId?.trim()) {
+      return this.snapshots.getOne({ dateKey, supplierId: supplierId.trim() });
+    }
+    return this.snapshots.getMany({ dateKey: dateKey?.trim() });
   }
 }

@@ -184,41 +184,71 @@ export class MeService {
     };
   }
 
-  async production(
-    userId: string,
-    q: { dateKey?: string; from?: string; to?: string; limit?: number },
-  ) {
-    const emp = await this.getEmployeeOrThrow(userId);
+ async production(
+  userId: string,
+  q: { dateKey?: string; from?: string; to?: string; limit?: number },
+) {
+  const emp = await this.getEmployeeOrThrow(userId);
 
-    const filter: any = { employeeId: new Types.ObjectId(emp._id) };
-    if (q.dateKey?.trim()) {
-      if (!isValidDateKey(q.dateKey.trim()))
-        throw new BadRequestException('dateKey inválido');
-      filter.dateKey = q.dateKey.trim();
-    } else if (q.from?.trim() && q.to?.trim()) {
-      if (!isValidDateKey(q.from.trim()) || !isValidDateKey(q.to.trim())) {
-        throw new BadRequestException('from/to inválidos');
-      }
-      filter.dateKey = { $gte: q.from.trim(), $lte: q.to.trim() };
+  const filter: any = { employeeId: new Types.ObjectId(emp._id) };
+
+  // filtros
+  if (q.dateKey?.trim()) {
+    const dk = q.dateKey.trim();
+    if (!isValidDateKey(dk)) throw new BadRequestException('dateKey inválido');
+    filter.dateKey = dk;
+  } else if (q.from?.trim() && q.to?.trim()) {
+    const from = q.from.trim();
+    const to = q.to.trim();
+    if (!isValidDateKey(from) || !isValidDateKey(to)) {
+      throw new BadRequestException('from/to inválidos');
     }
+    filter.dateKey = { $gte: from, $lte: to };
+  }
 
-    const rows = await this.productionModel
-      .find(filter)
-      .populate({ path: 'taskId', select: 'name area' })
-      .sort({ createdAt: -1 })
-      .limit(q.limit ?? 200)
-      .lean();
+  const limit = Math.min(Math.max(q.limit ?? 200, 1), 500);
 
-    // si ya populás task/employee en service de production, genial.
-    // sino devolvemos lo que haya; el front puede mostrar ids.
-    return rows.map((r: any) => ({
+  const rows = await this.productionModel
+    .find(filter)
+    .populate({ path: 'taskId', select: 'name area' })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
+
+  // ✅ Normalizar status por isDone (para que NO quede siempre "PENDING")
+  return rows.map((r: any) => {
+    const isDone = Boolean(r.isDone);
+    const status = (r.status ?? (isDone ? 'DONE' : 'PENDING')) as
+      | 'PENDING'
+      | 'DONE';
+
+    // hora principal: preferimos performedAt, sino createdAt
+    const moment = r.performedAt ?? r.createdAt ?? null;
+
+    return {
       id: String(r._id),
       dateKey: r.dateKey,
-      at: r.createdAt ?? null, // ✅ para que "HORA" deje de ser —
+
+      // el front usa performedAt/at para hora
+      performedAt: moment,
+      at: moment,
+
+      // opcional: si querés guardar string "HH:mm"
+      time: r.time ?? null,
+
+      // ✅ lo importante
+      isDone,
+      status,
+      doneAt: r.doneAt ?? null,
+
       taskId: r.taskId ? String(r.taskId._id ?? r.taskId) : null,
-      taskName: r.taskId?.name ?? null, // ✅ "Lavar Bacha"
-      area: r.taskId?.area ?? null, // ✅ "Caliente"
-      notes: r.notes ?? null,
-    }));
-  }
+      taskName: r.taskId?.name ?? null,
+      area: r.taskId?.area ?? null,
+
+      // notas siempre array
+      notes: Array.isArray(r.notes) ? r.notes : [],
+    };
+  });
+}
+
 }

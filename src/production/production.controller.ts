@@ -4,55 +4,98 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
   UseGuards,
-  UsePipes,
-  ValidationPipe,
 } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+
 import { ProductionService } from './production.service';
 import { CreateProductionDto } from './dto/create-production.dto';
-import { Roles } from '../auth/roles.decorator';
-import { JwtAuthGuard } from 'src/auth/jwt-auth.guard';
+import { ProductionStatus } from './schemas/production.schema';
+
+class MarkDoneBodyDto {
+  done!: boolean;
+}
+
+class AddNoteBodyDto {
+  text!: string;
+}
+
+class CancelBodyDto {
+  canceled!: boolean;
+}
 
 @Controller('production')
-@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+@UseGuards(AuthGuard('jwt'))
 export class ProductionController {
   constructor(private readonly productionService: ProductionService) {}
 
-  // Crear entrada (MANAGER/ADMIN)
-  @UseGuards(JwtAuthGuard)
   @Post()
-  @Roles('ADMIN', 'MANAGER')
-  create(@Body() dto: CreateProductionDto, @Req() req: any) {
-    const userId =
-      req?.user?.sub || req?.user?.id || req?.user?._id || req?.user?.userId;
-    return this.productionService.create(dto, String(userId));
+  create(@Req() req: any, @Body() dto: CreateProductionDto) {
+    return this.productionService.create(
+      dto,
+      String(req.user?._id ?? req.user?.id),
+    );
   }
 
-  // Listar
-  // GET /production?dateKey=2025-12-18&employeeId=...&taskId=...&limit=200
   @Get()
-  @Roles('ADMIN', 'MANAGER')
   list(
     @Query('dateKey') dateKey?: string,
     @Query('employeeId') employeeId?: string,
     @Query('taskId') taskId?: string,
+    @Query('status') status?: ProductionStatus,
+    @Query('isDone') isDone?: string, // "true" | "false"
     @Query('limit') limit?: string,
   ) {
     return this.productionService.list({
-      dateKey: dateKey?.trim() || undefined,
-      employeeId: employeeId?.trim() || undefined,
-      taskId: taskId?.trim() || undefined,
+      dateKey,
+      employeeId,
+      taskId,
+      status,
+      isDone,
       limit: limit ? Number(limit) : undefined,
     });
   }
 
-  // Borrar (opcional)
+  @Patch(':id/done')
+  markDone(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: MarkDoneBodyDto,
+  ) {
+    const userId = String(req.user?._id ?? req.user?.id);
+    return this.productionService.markDone(id, userId, Boolean(body.done));
+  }
+
+  @Post(':id/notes')
+  addNote(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: AddNoteBodyDto,
+  ) {
+    const userId = String(req.user?._id ?? req.user?.id);
+    return this.productionService.addNote(id, userId, body.text);
+  }
+
   @Delete(':id')
-  @Roles('ADMIN', 'MANAGER')
   remove(@Param('id') id: string) {
     return this.productionService.remove(id);
+  }
+
+  @Patch(':id/cancel')
+  cancel(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: CancelBodyDto,
+  ) {
+    const userId = String(req.user?._id ?? req.user?.id);
+    return this.productionService.setCanceled(
+      id,
+      userId,
+      Boolean(body.canceled),
+    );
   }
 }
