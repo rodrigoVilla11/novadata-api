@@ -1,3 +1,4 @@
+// stock-movement.schema.ts
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { StockMovementReason, StockMovementType } from '../enums/stock.enums';
@@ -49,6 +50,10 @@ export class StockMovement {
   })
   qty: number;
 
+  // ✅ Nuevo: saldo luego de aplicar el movimiento (para auditoría rápida)
+  @Prop({ type: Number, default: null })
+  qtyAfter?: number | null;
+
   @Prop({
     type: String,
     enum: StockMovementReason,
@@ -60,19 +65,43 @@ export class StockMovement {
   @Prop({ type: String, default: null, index: true })
   refType?: string | null;
 
-  @Prop({ type: String, default: null, index: true })
-  refId?: string | null;
+  // ✅ Mejor: ObjectId (si tu ref apunta a docs Mongo). Si querés refs externas,
+  // podés sumar un refIdText aparte.
+  @Prop({ type: Types.ObjectId, default: null, index: true })
+  refId?: Types.ObjectId | null;
 
   @Prop({ type: String, default: '' })
   note?: string;
 
+  // ✅ Mejor: ObjectId + ref User
+  @Prop({ type: Types.ObjectId, ref: 'User', default: null, index: true })
+  createdByUserId?: Types.ObjectId | null;
+
+  // ✅ Nuevo: clave idempotente para evitar duplicados (unique cuando existe)
   @Prop({ type: String, default: null, index: true })
-  createdByUserId?: string | null;
+  dedupeKey?: string | null;
 }
 
 export const StockMovementSchema = SchemaFactory.createForClass(StockMovement);
 
-
+// Listados comunes
 StockMovementSchema.index({ ingredientId: 1, createdAt: -1 });
 StockMovementSchema.index({ dateKey: 1, createdAt: -1 });
+
+// Filtros típicos por rango
+StockMovementSchema.index({ ingredientId: 1, dateKey: 1 });
+
+// Búsqueda por referencia
+StockMovementSchema.index({ refType: 1, refId: 1 });
+
+// ✅ Idempotencia real (solo cuando dedupeKey es string)
+StockMovementSchema.index(
+  { dedupeKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { dedupeKey: { $type: 'string' } },
+  },
+);
+
+// (Opcional) si querés mantener el índice anterior para queries legacy:
 StockMovementSchema.index({ refType: 1, refId: 1, ingredientId: 1, type: 1 });

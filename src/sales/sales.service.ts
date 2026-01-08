@@ -167,9 +167,9 @@ export class SalesService {
         amount: number;
         note?: string | null;
       }>;
-      concept?: string; // texto del movimiento
-      note?: string | null; // nota general de la venta
-      categoryId?: string | null; // si querés categorizar en finance
+      concept?: string;
+      note?: string | null;
+      categoryId?: string | null;
     },
   ) {
     if (!saleId) throw new BadRequestException('saleId is required');
@@ -178,20 +178,18 @@ export class SalesService {
       throw new BadRequestException('payments[] is required');
     }
 
-    const sale = await this.saleModel.findById(saleId);
-    if (!sale) throw new NotFoundException('Sale not found');
+    // 0) leer venta (para total/items)
+    const sale0 = await this.saleModel.findById(saleId).lean();
+    if (!sale0) throw new NotFoundException('Sale not found');
 
-    if (sale.status === SaleStatus.PAID) {
-      throw new BadRequestException('Sale is already PAID');
-    }
-    if (sale.status === SaleStatus.VOIDED || sale.voided) {
+    if (sale0.status === SaleStatus.VOIDED || (sale0 as any).voided) {
       throw new BadRequestException('Sale is VOIDED');
     }
-    if (!sale.items?.length) throw new BadRequestException('Sale has no items');
+    if (!(sale0 as any).items?.length)
+      throw new BadRequestException('Sale has no items');
 
-    const total = money(sale.total);
+    const total = money((sale0 as any).total);
 
-    // normalizar payments
     const payments = dto.payments
       .map((p) => ({
         method: p.method,
@@ -205,24 +203,53 @@ export class SalesService {
 
     const paidTotal = payments.reduce((acc, p) => acc + money(p.amount), 0);
 
-    // En POS normalmente querés que pague exacto
-    // Si querés permitir "vuelto" a futuro, lo hacemos.
     if (Math.abs(paidTotal - total) > 0.000001) {
       throw new BadRequestException(
         `Paid total (${paidTotal}) must equal sale total (${total})`,
       );
     }
 
-    // 1) Caja del día (branchId undefined)
+    // 1) Lock/idempotencia: si ya está PAID devolvemos la venta (no repetimos efectos)
+    if (sale0.status === SaleStatus.PAID) {
+      const already = await this.saleModel.findById(saleId).lean();
+      return this.toDto(already);
+    }
+
+    const locked = await this.saleModel.findOneAndUpdate(
+      {
+        _id: new Types.ObjectId(saleId),
+        status: SaleStatus.DRAFT,
+        voided: { $ne: true },
+      },
+      {
+        $set: {
+          status: SaleStatus.PAID, // lock optimista
+          paidAt: new Date(),
+          paidByUserId: pickUserId(user),
+          paidDateKey: dto.dateKey,
+        },
+      },
+      { new: true },
+    );
+
+    if (!locked) {
+      // Otro proceso lo pagó o cambió el estado
+      const cur = await this.saleModel.findById(saleId).lean();
+      if (!cur) throw new NotFoundException('Sale not found');
+      if (cur.status === SaleStatus.PAID) return this.toDto(cur);
+      throw new BadRequestException(`Sale status is ${cur.status}, cannot pay`);
+    }
+
+    // 2) Caja del día
     const day = await this.cashService.getOrCreateDay(
       user,
       dto.dateKey,
       undefined,
     );
 
-    // 2) Movimientos de caja (uno por método)
+    // 3) Movimientos de caja (uno por método)
     const conceptBase = (dto.concept ?? 'VENTA').trim() || 'VENTA';
-    const saleLabel = `Sale ${String(sale._id)}`;
+    const saleLabel = `Sale ${String(locked._id)}`;
 
     for (const p of payments) {
       await this.cashService.createMovement(user, {
@@ -233,38 +260,39 @@ export class SalesService {
         categoryId: dto.categoryId ?? null,
         concept: conceptBase,
         note: `${saleLabel}${p.note ? ` - ${p.note}` : ''}`,
-
         refType: 'SALE',
-        refId: String(sale._id),
+        refId: String(locked._id),
       } as any);
     }
 
-    // 3) Stock (descuento por receta/producto)
-    //    Ajustá el método si tu StockService tiene otro nombre.
-    //    La idea: por cada item vendido, aplicar movimiento OUT.
+    // 4) Stock (descuento por receta/producto) — ideal con idempotencia interna
     await this.stockService.applySale({
       dateKey: dto.dateKey,
-      saleId: String(sale._id),
-      lines: sale.items.map((it: any) => ({
-        productId: String(it.productId),
-        qty: num(it.qty),
-      })),
+      saleId: String(sale0._id),
+      userId: user?.id ? String(user.id) : null,
       note: dto.note ?? null,
-      userId: user?.id ?? user?._id ?? null,
+      lines: (sale0.items ?? []).map((it: any) => ({
+        productId: String(it.productId),
+        qty: Number(it.qty ?? 0),
+      })),
     });
 
-    // 4) Marcar venta como pagada
-    sale.status = SaleStatus.PAID;
-    sale.payments = payments as any;
-    sale.paidTotal = paidTotal;
-    sale.paidAt = new Date();
-    sale.paidByUserId = pickUserId(user);
-    sale.note = dto.note ? String(dto.note).trim() : (sale.note ?? null);
-    sale.paidDateKey = dto.dateKey;
+    // 5) Completar datos de pago (payments/paidTotal/note)
+    const updated = await this.saleModel.findByIdAndUpdate(
+      locked._id,
+      {
+        $set: {
+          payments: payments as any,
+          paidTotal,
+          note: dto.note
+            ? String(dto.note).trim()
+            : ((sale0 as any).note ?? null),
+        },
+      },
+      { new: true },
+    );
 
-    await sale.save();
-
-    return this.toDto(sale);
+    return this.toDto(updated);
   }
 
   // ============================

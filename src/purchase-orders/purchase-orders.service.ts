@@ -20,8 +20,8 @@ import {
   StockMovementReason,
   StockMovementType,
 } from 'src/stock/enums/stock.enums';
-import { StockMovement } from 'src/stock/schemas/stock-movement.schema';
 import { Unit } from 'src/ingredients/enums/unit.enum';
+import { StockService } from 'src/stock/stock.service';
 
 function todayKeyArgentina() {
   return new Intl.DateTimeFormat('en-CA', {
@@ -44,8 +44,7 @@ export class PurchaseOrdersService {
     private poModel: Model<PurchaseOrderDocument>,
     @InjectModel(Supplier.name) private supplierModel: Model<Supplier>,
     @InjectModel(Ingredient.name) private ingredientModel: Model<Ingredient>,
-    @InjectModel(StockMovement.name)
-    private movementModel: Model<StockMovement>,
+    private readonly stockService: StockService,
   ) {}
 
   private calcApprox(items: any[]) {
@@ -224,153 +223,152 @@ export class PurchaseOrdersService {
     id: string,
     dto: ReceivePurchaseOrderDto & { userId?: string | null },
   ) {
-    const session = await this.poModel.db.startSession();
+    const MAX_RETRIES = 3;
 
-    try {
-      let result: any;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const session = await this.poModel.db.startSession();
 
-      await session.withTransaction(async () => {
-        const doc = await this.poModel.findById(id).session(session);
-        if (!doc || doc.deletedAt)
-          throw new NotFoundException('Purchase order not found');
+      try {
+        let result: any;
 
-        if (
-          [PurchaseOrderStatus.CANCELLED, PurchaseOrderStatus.DRAFT].includes(
-            doc.status,
-          )
-        ) {
-          throw new BadRequestException(
-            'Order must be SENT/CONFIRMED to receive',
-          );
-        }
+        await session.withTransaction(async () => {
+          const doc = await this.poModel.findById(id).session(session);
+          if (!doc || doc.deletedAt)
+            throw new NotFoundException('Purchase order not found');
 
-        const dateKey = todayKeyArgentina();
-        const branchId = null; // igual que tu stock service
-
-        const updMap = new Map(
-          dto.items.map((i) => [String(i.ingredientId), i]),
-        );
-
-        // deltas para stock
-        const deltas: Array<{
-          ingredientId: Types.ObjectId;
-          deltaQty: number;
-          realUnitPrice?: number | null;
-          unit: Unit;
-        }> = [];
-
-        // 1) update items PO + delta
-        for (const it of doc.items as any[]) {
-          const upd = updMap.get(String(it.ingredientId));
-          if (!upd) continue;
-
-          const prevReceived = num(it.receivedQty);
-          const nextReceived =
-            upd.receivedQty != null ? num(upd.receivedQty) : prevReceived;
-
-          if (nextReceived < prevReceived) {
+          if (
+            [PurchaseOrderStatus.CANCELLED, PurchaseOrderStatus.DRAFT].includes(
+              doc.status,
+            )
+          ) {
             throw new BadRequestException(
-              `receivedQty cannot decrease for ingredient ${String(it.ingredientId)}`,
+              'Order must be SENT/CONFIRMED to receive',
             );
           }
 
-          const delta = nextReceived - prevReceived;
-          if (delta > 0) {
-            deltas.push({
-              ingredientId: it.ingredientId,
-              deltaQty: delta,
-              realUnitPrice:
-                upd.realUnitPrice != null
-                  ? num(upd.realUnitPrice)
-                  : (it.realUnitPrice ?? null),
-              unit: it.unit, // baseUnit del ingrediente normalmente
+          const dateKey = todayKeyArgentina();
+          const userObjId = dto.userId ? new Types.ObjectId(dto.userId) : null;
+
+          const updMap = new Map(
+            (dto.items ?? []).map((i) => [String(i.ingredientId), i]),
+          );
+
+          // 1) Deltas y updates del PO
+          const deltas: Array<{
+            ingredientId: Types.ObjectId;
+            unit: Unit;
+            deltaQty: number;
+            realUnitPrice?: number | null;
+          }> = [];
+
+          for (const it of doc.items as any[]) {
+            const upd = updMap.get(String(it.ingredientId));
+            if (!upd) continue;
+
+            const prevReceived = num(it.receivedQty);
+            const nextReceived =
+              upd.receivedQty != null ? num(upd.receivedQty) : prevReceived;
+
+            if (nextReceived < prevReceived) {
+              throw new BadRequestException(
+                `receivedQty cannot decrease for ingredient ${String(it.ingredientId)}`,
+              );
+            }
+
+            const delta = nextReceived - prevReceived;
+            if (delta > 0) {
+              deltas.push({
+                ingredientId: it.ingredientId,
+                unit: (it.unit ?? 'UNIT') as Unit,
+                deltaQty: delta,
+                realUnitPrice:
+                  upd.realUnitPrice != null
+                    ? num(upd.realUnitPrice)
+                    : (it.realUnitPrice ?? null),
+              });
+            }
+
+            it.receivedQty = nextReceived;
+            if (upd.realUnitPrice != null)
+              it.realUnitPrice = num(upd.realUnitPrice);
+          }
+
+          // 2) Aplicar stock (y movimiento) vía StockService en la misma txn
+          for (const d of deltas) {
+            // (opcional) si querés actualizar costos del ingrediente acá:
+            if (d.realUnitPrice != null) {
+              const ing = await this.ingredientModel
+                .findById(d.ingredientId)
+                .session(session);
+
+              if (!ing) {
+                throw new BadRequestException(
+                  `Ingredient not found: ${String(d.ingredientId)}`,
+                );
+              }
+
+              (ing as any).cost = (ing as any).cost ?? {};
+              (ing as any).cost.lastCost = d.realUnitPrice;
+
+              if (UPDATE_AVG_COST) {
+                const prevAvg = num((ing as any).cost?.avgCost);
+                (ing as any).cost.avgCost =
+                  prevAvg > 0
+                    ? (prevAvg + d.realUnitPrice) / 2
+                    : d.realUnitPrice;
+              }
+
+              await ing.save({ session });
+            }
+
+            await this.stockService.applyPurchaseReceiveTx({
+              session,
+              dateKey,
+              purchaseOrderId: doc._id,
+              ingredientId: d.ingredientId,
+              unit: d.unit,
+              qty: d.deltaQty,
+              note: `Recepción PO ${String(doc._id)} (${doc.supplierName})`,
+              createdByUserId: userObjId,
             });
           }
 
-          it.receivedQty = nextReceived;
+          // 3) totals + status
+          const realTotal = this.calcReal(doc.items as any[]);
+          doc.totals.realTotal = realTotal;
 
-          if (upd.realUnitPrice != null) {
-            it.realUnitPrice = num(upd.realUnitPrice);
-          }
-        }
+          const allReceived = (doc.items as any[]).every(
+            (it) => num(it.receivedQty) >= num(it.qty) && num(it.qty) > 0,
+          );
+          const someReceived = (doc.items as any[]).some(
+            (it) => num(it.receivedQty) > 0,
+          );
 
-        // 2) aplicar stock + costo y armar movimientos
-        const movementDocs: any[] = [];
+          if (allReceived) doc.status = PurchaseOrderStatus.RECEIVED;
+          else if (someReceived)
+            doc.status = PurchaseOrderStatus.RECEIVED_PARTIAL;
 
-        for (const d of deltas) {
-          const ing = await this.ingredientModel
-            .findById(d.ingredientId)
-            .session(session);
-          if (!ing)
-            throw new BadRequestException(
-              `Ingredient not found: ${String(d.ingredientId)}`,
-            );
+          await doc.save({ session });
 
-          // stock
-          const onHand = num((ing as any).stock?.onHand);
-          (ing as any).stock = (ing as any).stock ?? {};
-          (ing as any).stock.onHand = onHand + d.deltaQty;
+          result = this.toResponse(doc);
+        });
 
-          // costo
-          if (d.realUnitPrice != null) {
-            const prevAvg = num((ing as any).cost?.avgCost);
-            (ing as any).cost = (ing as any).cost ?? {};
-            (ing as any).cost.lastCost = d.realUnitPrice;
+        return result;
+      } catch (e: any) {
+        const labels: string[] = e?.errorLabelSet
+          ? Array.from(e.errorLabelSet)
+          : (e?.errorLabels ?? []);
 
-            // promedio simple (rápido). Si querés ponderado, lo cambiamos.
-            (ing as any).cost.avgCost =
-              prevAvg > 0 ? (prevAvg + d.realUnitPrice) / 2 : d.realUnitPrice;
-          }
+        const isTransient =
+          labels.includes('TransientTransactionError') ||
+          e?.code === 251 ||
+          e?.codeName === 'NoSuchTransaction';
 
-          await ing.save({ session });
-
-          // movimiento (campos válidos por tu estilo)
-          movementDocs.push({
-            dateKey,
-            branchId,
-            type: StockMovementType.IN,
-            reason: StockMovementReason.PURCHASE,
-            refType: 'PURCHASE',
-            refId: String(doc._id),
-
-            ingredientId: new Types.ObjectId(String(d.ingredientId)),
-            unit: d.unit,
-            qty: +Math.abs(num(d.deltaQty)),
-
-            note: `Recepción PO ${String(doc._id)} (${doc.supplierName})`,
-            // elegí UNO. Yo te recomiendo unificar a createdByUserId.
-            userId: dto.userId ? String(dto.userId) : null,
-          });
-        }
-
-        if (movementDocs.length) {
-          await this.movementModel.insertMany(movementDocs, { session });
-        }
-
-        // 3) recalcular realTotal (tu calcReal)
-        const realTotal = this.calcReal(doc.items as any[]);
-        doc.totals.realTotal = realTotal;
-
-        // 4) status
-        const allReceived = (doc.items as any[]).every(
-          (it) => num(it.receivedQty) >= num(it.qty) && num(it.qty) > 0,
-        );
-        const someReceived = (doc.items as any[]).some(
-          (it) => num(it.receivedQty) > 0,
-        );
-
-        if (allReceived) doc.status = PurchaseOrderStatus.RECEIVED;
-        else if (someReceived)
-          doc.status = PurchaseOrderStatus.RECEIVED_PARTIAL;
-
-        await doc.save({ session });
-
-        result = this.toResponse(doc);
-      });
-
-      return result;
-    } finally {
-      session.endSession();
+        if (isTransient && attempt < MAX_RETRIES) continue;
+        throw e;
+      } finally {
+        await session.endSession();
+      }
     }
   }
 }

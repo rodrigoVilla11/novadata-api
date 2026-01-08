@@ -5,7 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
-import { StockSnapshotsModule } from './stock-snapshots/stock-snapshots.module';
+// import { StockSnapshotsModule } from './stock-snapshots/stock-snapshots.module';
 import { EmployeesModule } from './employees/employees.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { TasksModule } from './tasks/tasks.module';
@@ -28,6 +28,7 @@ import { FinanceAccountsModule } from './finance/accounts/finance-accounts.modul
 import { FinanceCategoriesModule } from './finance/categories/finance-categories.module';
 import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
 import { FinanceStatsModule } from './finance/stats/finance-stats.module';
+import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
 
 @Module({
   imports: [
@@ -45,7 +46,7 @@ import { FinanceStatsModule } from './finance/stats/finance-stats.module';
     AuthModule,
     SuppliersModule,
     IngredientsModule,
-    StockSnapshotsModule,
+    // StockSnapshotsModule,
     EmployeesModule,
     AttendanceModule,
     TasksModule,
@@ -66,7 +67,8 @@ import { FinanceStatsModule } from './finance/stats/finance-stats.module';
     FinanceAccountsModule,
     FinanceCategoriesModule,
     FinanceClosingsModule,
-    FinanceStatsModule
+    FinanceStatsModule,
+    PurchaseOrdersModule
   ],
 })
 export class AppModule {}

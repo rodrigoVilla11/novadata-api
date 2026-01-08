@@ -3,8 +3,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model, Types } from 'mongoose';
 
 import { Ingredient } from 'src/ingredients/schemas/ingredients.schema';
 import { Unit } from 'src/ingredients/enums/unit.enum';
@@ -38,7 +38,7 @@ type ApplyMovementItem = {
 
 type ApplySaleInput = {
   dateKey: string; // YYYY-MM-DD
-  saleId: string; // id de la venta (ref)
+  saleId: string; // ObjectId string
   lines: Array<{ productId: string; qty: number }>;
   note?: string | null;
   userId?: string | null; // auditoría
@@ -46,21 +46,18 @@ type ApplySaleInput = {
 
 type ApplyManualInput = {
   dateKey: string;
-
   type: StockMovementType; // IN | OUT | ADJUST
   reason: StockMovementReason; // PURCHASE | MANUAL | WASTE | etc.
-
   refType?: string | null; // por ej "PURCHASE", "ADJUSTMENT"
-  refId?: string | null;
-
+  refId?: string | null; // ObjectId string (si querés idempotencia)
   items: ApplyMovementItem[];
   note?: string | null;
   userId?: string | null;
 };
 
-type ApplySaleVoidInput = {
+type ApplySaleReversalInput = {
   dateKey: string;
-  saleId: string;
+  saleId: string; // ObjectId string
   lines: Array<{ productId: string; qty: number }>;
   note?: string | null;
   userId?: string | null;
@@ -74,25 +71,145 @@ export class StockService {
     @InjectModel(Ingredient.name)
     private readonly ingredientModel: Model<Ingredient>,
     private readonly recipeService: RecipeService,
+    @InjectConnection()
+    private readonly conn: Connection,
   ) {}
 
+  private oidOrThrow(id: string, label: string) {
+    const s = String(id ?? '').trim();
+    if (!s) throw new BadRequestException(`${label} is required`);
+    if (!Types.ObjectId.isValid(s))
+      throw new BadRequestException(`${label} must be a valid ObjectId`);
+    return new Types.ObjectId(s);
+  }
+
+  private oidOrNull(id?: string | null, label?: string) {
+    const s = String(id ?? '').trim();
+    if (!s) return null;
+    if (!Types.ObjectId.isValid(s)) {
+      throw new BadRequestException(
+        `${label ?? 'id'} must be a valid ObjectId`,
+      );
+    }
+    return new Types.ObjectId(s);
+  }
+
+  private mkDedupeKey(parts: Array<string | null | undefined>) {
+    return parts
+      .map((x) => String(x ?? '').trim())
+      .filter(Boolean)
+      .join(':');
+  }
+
   /**
-   * Aplica una venta (productos) => genera movimientos OUT de ingredientes automáticamente
-   * Controller manda: { dateKey, saleId, lines, note?, userId? }
+   * Core: aplica UN movimiento por ingrediente (1 item) en transacción:
+   * - update Ingredient.stock (contabiliza)
+   * - insert StockMovement con qtyAfter
+   *
+   * Si dedupeKey ya existe => aborta y NO toca stock (rollback).
+   */
+  private async applyOneMovementTx(args: {
+    session: any;
+    dateKey: string;
+    ingredientId: Types.ObjectId;
+    unit: Unit;
+    qtyDelta: number; // signed
+    type: StockMovementType;
+    reason: StockMovementReason;
+    refType?: string | null;
+    refId?: Types.ObjectId | null;
+    note?: string | null;
+    createdByUserId?: Types.ObjectId | null;
+    dedupeKey?: string | null;
+    forbidNegative?: boolean; // default true
+  }) {
+    const forbidNegative = args.forbidNegative ?? true;
+
+    // 1) update stock actual
+    const inc: any = { 'stock.onHand': args.qtyDelta };
+
+    if (args.qtyDelta > 0) inc['stock.totalIn'] = args.qtyDelta;
+    if (args.qtyDelta < 0) inc['stock.totalOut'] = Math.abs(args.qtyDelta);
+
+    const updated = await this.ingredientModel.findOneAndUpdate(
+      { _id: args.ingredientId },
+      {
+        $inc: inc,
+        $set: { 'stock.lastMovementAt': new Date() },
+      },
+      {
+        new: true,
+        session: args.session,
+        projection: { stock: 1, baseUnit: 1 } as any,
+      },
+    );
+
+    if (!updated)
+      throw new NotFoundException(
+        `Ingredient not found: ${String(args.ingredientId)}`,
+      );
+
+    const onHandAfter = num((updated as any).stock?.onHand);
+    if (
+      forbidNegative &&
+      (updated as any).stock?.trackStock &&
+      onHandAfter < 0
+    ) {
+      const onHandBefore = onHandAfter - num(args.qtyDelta); // qtyDelta es signed
+      throw new BadRequestException(
+        `Stock negativo no permitido: ingredient=${String(args.ingredientId)} ` +
+          `before=${onHandBefore} delta=${args.qtyDelta} after=${onHandAfter} ` +
+          `unit=${args.unit} baseUnit=${String((updated as any).baseUnit ?? '')}`,
+      );
+    }
+
+    // 2) insert movement (idempotente por dedupeKey unique)
+    try {
+      await this.movementModel.create(
+        [
+          {
+            dateKey: args.dateKey,
+            ingredientId: args.ingredientId,
+            unit: args.unit,
+            type: args.type,
+            reason: args.reason,
+            refType: args.refType ?? null,
+            refId: args.refId ?? null,
+            qty: args.qtyDelta,
+            qtyAfter: onHandAfter,
+            note: args.note ?? null,
+            createdByUserId: args.createdByUserId ?? null,
+            dedupeKey: args.dedupeKey ?? null,
+          } as any,
+        ],
+        { session: args.session },
+      );
+    } catch (e: any) {
+      // clave duplicada => idempotencia (rollback automático por transacción)
+      if (e?.code === 11000) {
+        throw new BadRequestException('Duplicate movement (already applied)');
+      }
+      throw e;
+    }
+
+    return { onHandAfter };
+  }
+
+  /**
+   * Venta => OUT de ingredientes por receta
+   * Idempotencia: dedupeKey = SALE:<saleId>:<ingredientId>:<unit>:OUT
    */
   async applySale(dto: ApplySaleInput) {
     assertDateKey(dto.dateKey);
 
-    if (!dto.saleId?.trim())
-      throw new BadRequestException('saleId is required');
+    const saleObjId = this.oidOrThrow(dto.saleId, 'saleId');
+    const userObjId = this.oidOrNull(dto.userId, 'userId');
+
     if (!Array.isArray(dto.lines) || dto.lines.length === 0) {
       throw new BadRequestException('lines[] is required');
     }
 
-    // Por ahora NO usamos branchId
-    const branchId = null;
-
-    // 1) Expandir cada producto a ingredientes y acumular
+    // 1) Expandir productos -> ingredientes y acumular
     const acc = new Map<
       string,
       { ingredientId: string; unit: Unit; qty: number }
@@ -138,39 +255,81 @@ export class StockService {
       );
     }
 
-    // 2) Crear movimientos OUT (qty negativo)
-    const docs = items.map((it) => ({
-      dateKey: dto.dateKey,
-      branchId,
-      type: StockMovementType.OUT,
-      reason: StockMovementReason.SALE,
-      refType: 'SALE',
-      refId: dto.saleId,
-      ingredientId: new Types.ObjectId(it.ingredientId),
-      unit: it.unit,
-      qty: -Math.abs(num(it.qty)),
-      note: dto.note ?? null,
-      userId: dto.userId ? String(dto.userId) : null,
-    }));
+    // 2) Tx: por cada item, descontar stock y grabar movimiento
+    const session = await this.conn.startSession();
+    try {
+      const result = await session.withTransaction(async () => {
+        const outItems: Array<{
+          ingredientId: string;
+          unit: Unit;
+          qty: number;
+        }> = [];
+        let created = 0;
 
-    await this.movementModel.insertMany(docs);
+        for (const it of items) {
+          const ingObjId = this.oidOrThrow(it.ingredientId, 'ingredientId');
+          const qtyDelta = -Math.abs(num(it.qty));
 
-    return {
-      ok: true,
-      created: docs.length,
-      items: items.map((x) => ({
-        ingredientId: x.ingredientId,
-        unit: x.unit,
-        qty: x.qty, // positivo en respuesta (consumo)
-      })),
-    };
+          const dedupeKey = this.mkDedupeKey([
+            'SALE',
+            String(saleObjId),
+            String(ingObjId),
+            it.unit,
+            StockMovementType.OUT,
+          ]);
+
+          try {
+            await this.applyOneMovementTx({
+              session,
+              dateKey: dto.dateKey,
+              ingredientId: ingObjId,
+              unit: it.unit,
+              qtyDelta,
+              type: StockMovementType.OUT,
+              reason: StockMovementReason.SALE,
+              refType: 'SALE',
+              refId: saleObjId, // ✅ string
+              note: dto.note ?? null,
+              createdByUserId: userObjId, // ✅ según tu schema
+              dedupeKey,
+            });
+
+            created += 1;
+          } catch (e: any) {
+            // ✅ idempotencia: si ya existía el movimiento, lo tratamos como OK
+            const msg = String(e?.message ?? '');
+            const code = e?.code;
+            const isDup = code === 11000 || msg.includes('E11000');
+            if (!isDup) throw e;
+          }
+
+          outItems.push({
+            ingredientId: String(ingObjId),
+            unit: it.unit,
+            qty: Math.abs(qtyDelta),
+          });
+        }
+
+        return { created, outItems };
+      });
+
+      return {
+        ok: true,
+        created: result?.created ?? 0,
+        items: result?.outItems ?? [],
+        idempotent: (result?.created ?? 0) === 0, // opcional, útil para debug
+      };
+    } finally {
+      session.endSession();
+    }
   }
 
   /**
-   * Aplica movimiento manual (compras, ajustes, merma, etc.)
-   * - IN => qty positivo
-   * - OUT => qty negativo
-   * - ADJUST => qty signed (≠ 0)
+   * Manual (compras/merma/ajuste/etc.) => contabiliza
+   *
+   * Idempotencia:
+   * - si viene refType + refId => dedupeKey por item
+   * - si no viene refId => no dedupe (manual libre)
    */
   async applyManual(input: ApplyManualInput) {
     assertDateKey(input.dateKey);
@@ -181,182 +340,111 @@ export class StockService {
       throw new BadRequestException('items[] is required');
     }
 
-    // Por ahora NO usamos branchId
-    const branchId = null;
+    const refType = input.refType ? String(input.refType).trim() : null;
+    const refObjId = this.oidOrNull(input.refId, 'refId');
+    const userObjId = this.oidOrNull(input.userId, 'userId');
 
-    // Si no viene unit, la sacamos del ingrediente
-    const ids = input.items.map((x) => x.ingredientId).filter(Boolean);
+    // Resolver baseUnit si falta unit
+    const ids = input.items
+      .map((x) => String(x.ingredientId || '').trim())
+      .filter(Boolean);
     const ingredientDocs = await this.ingredientModel
       .find({ _id: { $in: ids.map((id) => new Types.ObjectId(id)) } })
-      .select({ unit: 1, baseUnit: 1 })
+      .select({ baseUnit: 1 })
       .lean();
 
     const ingById = new Map<string, any>();
     for (const d of ingredientDocs as any[]) ingById.set(String(d._id), d);
 
-    const docs = input.items.map((it) => {
-      const ingredientId = String(it.ingredientId || '').trim();
-      if (!ingredientId)
-        throw new BadRequestException('ingredientId is required');
+    const session = await this.conn.startSession();
+    try {
+      const res = await session.withTransaction(async () => {
+        let created = 0;
 
-      const ing = ingById.get(ingredientId);
-      if (!ing)
-        throw new NotFoundException(`Ingredient not found: ${ingredientId}`);
+        for (const it of input.items) {
+          const ingredientIdStr = String(it.ingredientId || '').trim();
+          if (!ingredientIdStr)
+            throw new BadRequestException('ingredientId is required');
 
-      const unit = (it.unit ?? ing.baseUnit ?? ing.unit ?? Unit.UNIT) as Unit;
+          const ing = ingById.get(ingredientIdStr);
+          if (!ing)
+            throw new NotFoundException(
+              `Ingredient not found: ${ingredientIdStr}`,
+            );
 
-      if (input.type === StockMovementType.ADJUST) {
-        const signed = num(it.qty);
-        if (!Number.isFinite(signed) || signed === 0) {
-          throw new BadRequestException(
-            'For ADJUST, qty must be a signed non-zero number',
-          );
+          const ingObjId = new Types.ObjectId(ingredientIdStr);
+          const unit = (it.unit ?? ing.baseUnit ?? Unit.UNIT) as Unit;
+
+          let qtyDelta = 0;
+
+          if (input.type === StockMovementType.ADJUST) {
+            const signed = num(it.qty);
+            if (!Number.isFinite(signed) || signed === 0) {
+              throw new BadRequestException(
+                'For ADJUST, qty must be a signed non-zero number',
+              );
+            }
+            qtyDelta = signed;
+          } else {
+            const qtyAbs = Math.abs(num(it.qty));
+            if (!Number.isFinite(qtyAbs) || qtyAbs <= 0)
+              throw new BadRequestException('qty must be > 0');
+            qtyDelta = input.type === StockMovementType.OUT ? -qtyAbs : +qtyAbs;
+          }
+
+          const hasDedupe = !!(refType && refObjId);
+          const dedupeKey = hasDedupe
+            ? this.mkDedupeKey([
+                refType!,
+                String(refObjId),
+                String(ingObjId),
+                unit,
+                input.type,
+              ])
+            : null;
+
+          await this.applyOneMovementTx({
+            session,
+            dateKey: input.dateKey,
+            ingredientId: ingObjId,
+            unit,
+            qtyDelta,
+            type: input.type,
+            reason: input.reason,
+            refType,
+            refId: refObjId,
+            note: it.note ?? input.note ?? null,
+            createdByUserId: userObjId,
+            dedupeKey,
+          });
+
+          created += 1;
         }
 
-        return {
-          dateKey: input.dateKey,
-          branchId,
-          type: input.type,
-          reason: input.reason,
-          refType: input.refType ?? null,
-          refId: input.refId ?? null,
-          ingredientId: new Types.ObjectId(ingredientId),
-          unit,
-          qty: signed,
-          note: it.note ?? input.note ?? null,
-          userId: input.userId ? String(input.userId) : null,
-        };
-      }
+        return created;
+      });
 
-      const qtyAbs = Math.abs(num(it.qty));
-      if (!Number.isFinite(qtyAbs) || qtyAbs <= 0) {
-        throw new BadRequestException('qty must be > 0');
-      }
-
-      const qtySigned =
-        input.type === StockMovementType.OUT ? -qtyAbs : +qtyAbs;
-
-      return {
-        dateKey: input.dateKey,
-        branchId,
-        type: input.type,
-        reason: input.reason,
-        refType: input.refType ?? null,
-        refId: input.refId ?? null,
-        ingredientId: new Types.ObjectId(ingredientId),
-        unit,
-        qty: qtySigned,
-        note: it.note ?? input.note ?? null,
-        userId: input.userId ? String(input.userId) : null,
-      };
-    });
-
-    await this.movementModel.insertMany(docs);
-    return { ok: true, created: docs.length };
+      return { ok: true, created: res ?? 0 };
+    } finally {
+      session.endSession();
+    }
   }
 
   /**
-   * Balance actual por ingrediente (sumando movimientos)
-   * Sin branchId por ahora.
+   * Reversa de venta: devuelve ingredientes consumidos (REVERSAL qty +)
+   * Idempotencia: dedupeKey = SALE:<saleId>:<ingredientId>:<unit>:REVERSAL
    */
-  async getBalances(params?: { ingredientId?: string | null }) {
-    const match: any = { branchId: null };
-
-    if (params?.ingredientId) {
-      match.ingredientId = new Types.ObjectId(params.ingredientId);
-    }
-
-    const agg = await this.movementModel.aggregate([
-      { $match: match },
-      {
-        $group: {
-          _id: { ingredientId: '$ingredientId', unit: '$unit' },
-          qty: { $sum: '$qty' },
-          lastAt: { $max: '$createdAt' },
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          ingredientId: { $toString: '$_id.ingredientId' },
-          unit: '$_id.unit',
-          qty: 1,
-          lastAt: 1,
-        },
-      },
-      { $sort: { ingredientId: 1 } },
-    ]);
-
-    return agg.map((x: any) => ({
-      ingredientId: x.ingredientId,
-      unit: x.unit,
-      qty: num(x.qty),
-      lastAt: x.lastAt ?? null,
-    }));
-  }
-
-  /**
-   * Movimientos (auditoría)
-   * Sin branchId por ahora.
-   */
-  async listMovements(params?: {
-    dateKey?: string;
-    ingredientId?: string | null;
-    refType?: string | null;
-    refId?: string | null;
-    limit?: number;
-  }) {
-    const filter: any = { branchId: null };
-
-    if (params?.dateKey) {
-      assertDateKey(params.dateKey);
-      filter.dateKey = params.dateKey;
-    }
-
-    if (params?.ingredientId)
-      filter.ingredientId = new Types.ObjectId(params.ingredientId);
-    if (params?.refType) filter.refType = String(params.refType);
-    if (params?.refId) filter.refId = String(params.refId);
-
-    const limit = Math.min(500, Math.max(1, Number(params?.limit ?? 100)));
-
-    const rows = await this.movementModel
-      .find(filter)
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
-
-    return rows.map((m: any) => ({
-      id: String(m._id),
-      dateKey: m.dateKey,
-      branchId: null,
-      type: m.type,
-      reason: m.reason,
-      refType: m.refType ?? null,
-      refId: m.refId ?? null,
-      ingredientId: m.ingredientId ? String(m.ingredientId) : null,
-      unit: m.unit,
-      qty: num(m.qty),
-      note: m.note ?? null,
-      userId: m.userId ?? null,
-      createdAt: m.createdAt,
-    }));
-  }
-
-  async applySaleReversal(dto: {
-    dateKey: string;
-    saleId: string;
-    lines: Array<{ productId: string; qty: number }>;
-    note?: string | null;
-    userId?: string | null;
-  }) {
+  async applySaleReversal(dto: ApplySaleReversalInput) {
     assertDateKey(dto.dateKey);
-    if (!dto.saleId?.trim())
-      throw new BadRequestException('saleId is required');
+
+    const saleObjId = this.oidOrThrow(dto.saleId, 'saleId');
+    const userObjId = this.oidOrNull(dto.userId, 'userId');
+
     if (!Array.isArray(dto.lines) || dto.lines.length === 0) {
       throw new BadRequestException('lines[] is required');
     }
 
+    // 1) Expandir productos -> ingredientes y acumular
     const acc = new Map<
       string,
       { ingredientId: string; unit: Unit; qty: number }
@@ -365,6 +453,7 @@ export class StockService {
     for (const line of dto.lines) {
       const productId = String(line.productId || '').trim();
       const qty = num(line.qty);
+
       if (!productId)
         throw new BadRequestException('line.productId is required');
       if (!Number.isFinite(qty) || qty <= 0)
@@ -392,28 +481,174 @@ export class StockService {
       .map((x) => ({ ...x, qty: clampNonNeg(x.qty) }))
       .filter((x) => x.qty > 0);
 
-    if (!items.length)
+    if (!items.length) {
       throw new BadRequestException('No ingredient restore computed');
+    }
 
-    const docs = items.map((it) => ({
-      dateKey: dto.dateKey,
-      type: StockMovementType.REVERSAL,
-      reason: StockMovementReason.SALE,
-      refType: 'SALE',
-      refId: dto.saleId,
+    const session = await this.conn.startSession();
+    try {
+      const created = await session.withTransaction(async () => {
+        let count = 0;
 
-      ingredientId: new Types.ObjectId(it.ingredientId),
-      unit: it.unit,
+        for (const it of items) {
+          const ingObjId = this.oidOrThrow(it.ingredientId, 'ingredientId');
+          const qtyDelta = +Math.abs(num(it.qty));
 
-      // REVERSAL del OUT => qty positivo
-      qty: +Math.abs(num(it.qty)),
+          const dedupeKey = this.mkDedupeKey([
+            'SALE',
+            String(saleObjId),
+            String(ingObjId),
+            it.unit,
+            StockMovementType.REVERSAL,
+          ]);
 
-      note: dto.note ?? null,
-      createdByUserId: dto.userId ? String(dto.userId) : null,
+          await this.applyOneMovementTx({
+            session,
+            dateKey: dto.dateKey,
+            ingredientId: ingObjId,
+            unit: it.unit,
+            qtyDelta,
+            type: StockMovementType.REVERSAL,
+            reason: StockMovementReason.SALE,
+            refType: 'SALE',
+            refId: saleObjId,
+            note: dto.note ?? null,
+            createdByUserId: userObjId,
+            dedupeKey,
+            // reversa no debería “romper” por stock negativo, así que dejamos forbidNegative true igual.
+          });
+
+          count += 1;
+        }
+
+        return count;
+      });
+
+      return { ok: true, created: created ?? 0 };
+    } finally {
+      session.endSession();
+    }
+  }
+
+  /**
+   * Balance actual (rápido): usa Ingredient.stock.onHand
+   */
+  async getBalances(params?: { ingredientId?: string | null }) {
+    const filter: any = {};
+    if (params?.ingredientId)
+      filter._id = new Types.ObjectId(params.ingredientId);
+
+    const rows = await this.ingredientModel
+      .find(filter)
+      .select({ name: 1, displayName: 1, baseUnit: 1, stock: 1 })
+      .lean();
+
+    return rows.map((r: any) => ({
+      ingredientId: String(r._id),
+      ingredientName: String(r.displayName ?? r.name ?? ''),
+      unit: r.baseUnit,
+      qty: num(r.stock?.onHand),
+      reserved: num(r.stock?.reserved),
+      totalIn: num(r.stock?.totalIn),
+      totalOut: num(r.stock?.totalOut),
+      lastAt: r.stock?.lastMovementAt ?? null,
     }));
+  }
 
-    await this.movementModel.insertMany(docs);
+  /**
+   * Movimientos (auditoría)
+   */
+  async listMovements(params?: {
+    dateKey?: string;
+    ingredientId?: string | null;
+    refType?: string | null;
+    refId?: string | null; // ObjectId string
+    limit?: number;
+  }) {
+    const filter: any = {};
 
-    return { ok: true, created: docs.length };
+    if (params?.dateKey) {
+      assertDateKey(params.dateKey);
+      filter.dateKey = params.dateKey;
+    }
+    if (params?.ingredientId)
+      filter.ingredientId = new Types.ObjectId(params.ingredientId);
+    if (params?.refType) filter.refType = String(params.refType);
+    if (params?.refId) filter.refId = new Types.ObjectId(params.refId);
+
+    const limit = Math.min(500, Math.max(1, Number(params?.limit ?? 100)));
+
+    const rows = await this.movementModel
+      .find(filter)
+      .populate({ path: 'ingredientId', select: 'name displayName baseUnit' })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    return rows.map((m: any) => {
+      const ing =
+        m.ingredientId && typeof m.ingredientId === 'object'
+          ? m.ingredientId
+          : null;
+
+      return {
+        id: String(m._id),
+        dateKey: m.dateKey,
+        type: m.type,
+        reason: m.reason,
+        refType: m.refType ?? null,
+        refId: m.refId ? String(m.refId) : null,
+
+        ingredientId: ing
+          ? String(ing._id)
+          : m.ingredientId
+            ? String(m.ingredientId)
+            : null,
+        ingredientName: ing ? String(ing.displayName ?? ing.name ?? '') : null,
+        unit: m.unit,
+
+        qty: num(m.qty),
+        qtyAfter: m.qtyAfter ?? null,
+        note: m.note ?? null,
+        createdByUserId: m.createdByUserId ? String(m.createdByUserId) : null,
+        createdAt: m.createdAt,
+        dedupeKey: m.dedupeKey ?? null,
+      };
+    });
+  }
+
+  // stock.service.ts
+  async applyPurchaseReceiveTx(input: {
+    session: any;
+    dateKey: string;
+    purchaseOrderId: Types.ObjectId;
+    ingredientId: Types.ObjectId;
+    unit: Unit;
+    qty: number; // +qty
+    note?: string | null;
+    createdByUserId?: Types.ObjectId | null;
+  }) {
+    const dedupeKey = this.mkDedupeKey([
+      'PURCHASE',
+      String(input.purchaseOrderId),
+      String(input.ingredientId),
+      input.unit,
+      StockMovementType.IN,
+    ]);
+
+    await this.applyOneMovementTx({
+      session: input.session,
+      dateKey: input.dateKey,
+      ingredientId: input.ingredientId,
+      unit: input.unit,
+      qtyDelta: Math.abs(input.qty),
+      type: StockMovementType.IN,
+      reason: StockMovementReason.PURCHASE,
+      refType: 'PURCHASE',
+      refId: input.purchaseOrderId,
+      note: input.note ?? null,
+      createdByUserId: input.createdByUserId ?? null,
+      dedupeKey,
+    });
   }
 }

@@ -75,6 +75,7 @@ export class PosService {
   // ============================
   // Checkout = Order -> Sale -> Pay
   // ============================
+  // pos.service.ts (solo el método checkoutCart)
 
   async checkoutCart(
     user: any,
@@ -87,8 +88,10 @@ export class PosService {
       categoryId?: string | null;
     },
   ) {
-    if (!dto?.dateKey) throw new BadRequestException('dateKey is required');
-    if (!Array.isArray(dto?.payments) || !dto.payments.length) {
+    assertDateKey(dto?.dateKey);
+
+    if (!orderId?.trim()) throw new BadRequestException('orderId is required');
+    if (!Array.isArray(dto?.payments) || dto.payments.length === 0) {
       throw new BadRequestException('payments[] is required');
     }
 
@@ -97,20 +100,33 @@ export class PosService {
     if (order.source !== 'POS') {
       throw new BadRequestException('Order source must be POS');
     }
-    if (order.status !== OrderStatus.DRAFT) {
-      throw new BadRequestException(`Cart must be DRAFT (is ${order.status})`);
+
+    // Permitimos checkout desde DRAFT, pero lo “cerramos” (ACCEPT) antes de pagar.
+    // Si tu accept() no es idempotente, ajustalo para que si ya está ACCEPTED devuelva ok.
+    if (order.status === OrderStatus.CANCELLED) {
+      throw new BadRequestException('Cart is CANCELLED');
     }
-    if (!order.items?.length)
+    if (!order.items?.length) {
       throw new BadRequestException('Cart has no items');
+    }
 
-    // 1) Obtener o crear Sale desde Order (idempotente)
+    // 1) Cerrar carrito (idempotente)
+    if (order.status === OrderStatus.DRAFT) {
+      await this.ordersService.accept(orderId);
+    } else if (order.status !== OrderStatus.ACCEPTED) {
+      // si tenés otros estados válidos para checkout, agregalos acá
+      throw new BadRequestException(
+        `Cart must be DRAFT or ACCEPTED (is ${order.status})`,
+      );
+    }
+
+    // 2) Obtener o crear Sale desde Order (idempotente por orderId)
     let sale = await this.salesService.findByOrderId(orderId);
-
     if (!sale) {
       sale = await this.salesService.createFromOrder(user, orderId);
     }
 
-    // si ya está pagada, devolvemos tal cual
+    // 3) Si ya está pagada, devolvemos tal cual (idempotente)
     if (sale.status === SaleStatus.PAID) {
       return {
         orderId: order.id,
@@ -125,15 +141,20 @@ export class PosService {
     }
 
     // si está voided, no permitimos pagar
-    if (sale.status === SaleStatus.VOIDED || sale.voided) {
+    if (sale.status === SaleStatus.VOIDED || (sale as any).voided) {
       throw new BadRequestException('Sale is VOIDED');
     }
 
-    // 2) Pagar (esto crea movimientos en Cash + stock OUT)
+    // 4) Pagar (caja + stock OUT + marcar PAID)
+    //    IMPORTANTE: SalesService.pay debe ser idempotente (lock DRAFT->PAID) para evitar doble cobro por retries.
     const paid = await this.salesService.pay(user, sale.id, {
       dateKey: dto.dateKey,
-      payments: dto.payments as any,
-      concept: dto.concept ?? 'VENTA',
+      payments: dto.payments.map((p) => ({
+        method: p.method,
+        amount: num(p.amount),
+        note: p.note ?? null,
+      })) as any,
+      concept: dto.concept ?? 'VENTA POS',
       note: dto.note ?? null,
       categoryId: dto.categoryId ?? null,
     });

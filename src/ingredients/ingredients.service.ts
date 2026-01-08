@@ -1,4 +1,4 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 
@@ -30,10 +30,39 @@ type CreateIngredientInput = {
 };
 
 @Injectable()
-export class IngredientsService {
+export class IngredientsService implements OnModuleInit {
+  private readonly logger = new Logger(IngredientsService.name);
+
   constructor(
     @InjectModel(Ingredient.name) private ingredientModel: Model<Ingredient>,
   ) {}
+
+  // ===========================================================================
+  // SEED TEST STOCK (DEV ONLY)
+  // ===========================================================================
+  async onModuleInit() {
+
+    const res = await this.ingredientModel.updateMany(
+      {},
+      {
+        $set: {
+          'stock.trackStock': true,
+        },
+        $inc: {
+          'stock.onHand': 100,
+          'stock.totalIn': 100,
+        },
+        $currentDate: {
+          'stock.lastMovementAt': true,
+        },
+      },
+    );
+
+    const matched = (res as any).matchedCount ?? (res as any).n ?? 0;
+    const modified = (res as any).modifiedCount ?? (res as any).nModified ?? 0;
+
+    this.logger.log(`Seed stock OK. matched=${matched} modified=${modified}`);
+  }
 
   // ===========================================================================
   // CREATE

@@ -67,12 +67,26 @@ export class IngredientStock {
   @Prop({ type: Number, default: 0, min: 0 })
   minQty: number;
 
-  // objetivo (ideal) opcional para sugerencias de compra
   @Prop({ type: Number, default: null, min: 0 })
   idealQty?: number | null;
 
   @Prop({ type: String, trim: true, default: null })
   storageLocation?: string | null;
+
+  // ✅ NUEVO: contabilidad rápida (no reemplaza el ledger)
+  @Prop({ type: Number, default: 0 })
+  totalIn: number;
+
+  @Prop({ type: Number, default: 0 })
+  totalOut: number;
+
+  // ✅ NUEVO: última vez que se movió stock
+  @Prop({ type: Date, default: null })
+  lastMovementAt?: Date | null;
+
+  // ✅ NUEVO: última vez que hiciste un recuento físico (si lo usás)
+  @Prop({ type: Date, default: null })
+  lastRecountAt?: Date | null;
 }
 
 @Schema({ _id: false })
@@ -158,7 +172,12 @@ export class Ingredient {
   // ------------------------
   // Tags/categoría (opcional)
   // ------------------------
-  @Prop({ type: Types.ObjectId, ref: 'IngredientCategory', default: null, index: true })
+  @Prop({
+    type: Types.ObjectId,
+    ref: 'IngredientCategory',
+    default: null,
+    index: true,
+  })
   categoryId?: Types.ObjectId | null;
 
   @Prop({ type: [String], default: [] })

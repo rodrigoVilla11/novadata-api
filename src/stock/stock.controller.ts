@@ -1,113 +1,80 @@
-// src/stock/stock.controller.ts
-import {
-  Body,
-  Controller,
-  Get,
-  Post,
-  Query,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
-import { Roles } from 'src/auth/roles.decorator';
 import { StockService } from './stock.service';
 import { StockMovementReason, StockMovementType } from './enums/stock.enums';
+import { Roles } from 'src/auth/roles.decorator';
 
 @Controller('stock')
 @UseGuards(AuthGuard('jwt'))
+@Roles('ADMIN', 'MANAGER', 'CASHIER')
 export class StockController {
   constructor(private readonly stockService: StockService) {}
 
   /**
    * POST /stock/sale
-   * Aplica consumo automático por venta (POS / online).
-   * Roles: ADMIN, MANAGER, CASHIER
+   * Aplica una venta (descuenta ingredientes según recetas)
    */
   @Post('sale')
-  @Roles('ADMIN', 'MANAGER', 'CASHIER')
-  async applySale(
-    @Body()
-    body: {
-      dateKey: string;
-      saleId: string;
-      lines: Array<{ productId: string; qty: number }>;
-      note?: string | null;
-      userId?: string | null;
-    },
-  ) {
+  applySale(@Req() req: any, @Body() body: any) {
     return this.stockService.applySale({
-      dateKey: body.dateKey,
-      saleId: body.saleId,
-      lines: body.lines,
-      note: body.note ?? null,
-      userId: body.userId ?? null,
-      // branchId: NO por ahora
+      dateKey: body?.dateKey,
+      saleId: body?.saleId,
+      lines: body?.lines ?? [],
+      note: body?.note ?? null,
+      userId: req?.user?._id ? String(req.user._id) : null,
+    });
+  }
+
+  /**
+   * POST /stock/sale-reversal
+   * Revierte una venta (devuelve ingredientes)
+   */
+  @Post('sale-reversal')
+  applySaleReversal(@Req() req: any, @Body() body: any) {
+    return this.stockService.applySaleReversal({
+      dateKey: body?.dateKey,
+      saleId: body?.saleId,
+      lines: body?.lines ?? [],
+      note: body?.note ?? null,
+      userId: req?.user?._id ? String(req.user._id) : null,
     });
   }
 
   /**
    * POST /stock/manual
-   * Aplica movimientos manuales (compras, merma, ajustes, carga inicial)
-   * Roles: ADMIN, MANAGER
+   * Movimientos manuales: compras, merma, ajustes, etc.
    */
   @Post('manual')
-  @Roles('ADMIN', 'MANAGER')
-  async applyManual(
-    @Body()
-    body: {
-      dateKey: string;
-
-      type: StockMovementType;
-      reason: StockMovementReason;
-
-      refType?: string | null;
-      refId?: string | null;
-
-      items: Array<{
-        ingredientId: string;
-        qty: number; // IN/OUT: positivo; ADJUST: signed
-        unit?: any; // Unit (opcional)
-        note?: string | null;
-      }>;
-
-      note?: string | null;
-      userId?: string | null;
-    },
-  ) {
+  applyManual(@Req() req: any, @Body() body: any) {
     return this.stockService.applyManual({
-      dateKey: body.dateKey,
-      type: body.type,
-      reason: body.reason,
-      refType: body.refType ?? null,
-      refId: body.refId ?? null,
-      items: body.items ?? [],
-      note: body.note ?? null,
-      userId: body.userId ?? null,
-      // branchId: NO por ahora
+      dateKey: body?.dateKey,
+      type: body?.type as StockMovementType,
+      reason: body?.reason as StockMovementReason,
+      refType: body?.refType ?? null,
+      refId: body?.refId ?? null, // ObjectId string (si querés idempotencia)
+      items: body?.items ?? [],
+      note: body?.note ?? null,
+      userId: req?.user?._id ? String(req.user._id) : null,
     });
   }
 
   /**
-   * GET /stock/balances
-   * ?ingredientId=...
-   * Roles: ADMIN, MANAGER, CASHIER
+   * GET /stock/balances?ingredientId=<id?>
+   * Balance actual (rápido) desde Ingredient.stock.onHand
    */
   @Get('balances')
-  @Roles('ADMIN', 'MANAGER', 'CASHIER')
-  async balances(@Query('ingredientId') ingredientId?: string) {
+  getBalances(@Query('ingredientId') ingredientId?: string) {
     return this.stockService.getBalances({
       ingredientId: ingredientId?.trim() ? ingredientId.trim() : null,
-      // branchId: NO por ahora
     });
   }
 
   /**
-   * GET /stock/movements
-   * ?dateKey=YYYY-MM-DD&ingredientId=...&refType=SALE&refId=...
-   * Roles: ADMIN, MANAGER, CASHIER
+   * GET /stock/movements?dateKey=YYYY-MM-DD&ingredientId=&refType=&refId=&limit=
+   * Auditoría de movimientos
    */
   @Get('movements')
-  @Roles('ADMIN', 'MANAGER', 'CASHIER')
-  async movements(
+  listMovements(
     @Query('dateKey') dateKey?: string,
     @Query('ingredientId') ingredientId?: string,
     @Query('refType') refType?: string,
@@ -120,7 +87,6 @@ export class StockController {
       refType: refType?.trim() ? refType.trim() : null,
       refId: refId?.trim() ? refId.trim() : null,
       limit: limit ? Number(limit) : undefined,
-      // branchId: NO por ahora
     });
   }
 }
