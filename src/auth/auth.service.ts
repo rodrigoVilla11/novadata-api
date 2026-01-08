@@ -17,7 +17,9 @@ export class AuthService {
       expiresIn: '15m',
     });
   }
-
+  private refreshSecret() {
+    return process.env.JWT_REFRESH_SECRET || 'refresh_dev';
+  }
   private signRefreshToken(payload: any) {
     return this.jwt.sign(payload, {
       secret: process.env.JWT_REFRESH_SECRET || 'refresh_dev',
@@ -79,6 +81,14 @@ export class AuthService {
     await this.users.setRefreshTokenHash(validUser.id, newRefreshToken);
 
     return { accessToken, refreshToken: newRefreshToken, user: validUser };
+  }
+
+  verifyRefreshToken(token: string) {
+    try {
+      return this.jwt.verify(token, { secret: this.refreshSecret() }) as any;
+    } catch {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
   }
 
   async logout(userId: string) {
