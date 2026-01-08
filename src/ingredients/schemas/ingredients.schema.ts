@@ -4,7 +4,6 @@ import { Unit } from '../enums/unit.enum';
 
 export type IngredientDocument = HydratedDocument<Ingredient>;
 
-// Opcional: tipos simples (podés moverlos a /enums si querés)
 export enum StorageType {
   AMBIENT = 'AMBIENT',
   REFRIGERATED = 'REFRIGERATED',
@@ -16,23 +15,18 @@ export class IngredientSupplier {
   @Prop({ type: Types.ObjectId, ref: 'Supplier', required: true, index: true })
   supplierId: Types.ObjectId;
 
-  // 👇 Nombre como figura en el proveedor (factura / lista)
   @Prop({ type: String, trim: true, default: null })
   name_for_supplier?: string | null;
 
-  // Código del proveedor (SKU proveedor)
   @Prop({ type: String, trim: true, default: null })
   supplier_code?: string | null;
 
-  // Unidad de compra (ej: caja, bolsa, bidón) como texto libre para no bloquearte
   @Prop({ type: String, trim: true, default: null })
   purchase_unit?: string | null;
 
-  // Cantidad que trae 1 unidad de compra medida en baseUnit (ej bidón 5 lt => 5)
   @Prop({ type: Number, default: null, min: 0 })
   purchase_unit_qty?: number | null;
 
-  // Precio de esa unidad de compra (si lo querés guardar por proveedor)
   @Prop({ type: Number, default: null, min: 0 })
   purchase_unit_price?: number | null;
 
@@ -42,7 +36,6 @@ export class IngredientSupplier {
 
 @Schema({ _id: false })
 export class IngredientCost {
-  // costo unitario en baseUnit (ej: ARS por kg / por lt / por unid)
   @Prop({ type: Number, default: 0, min: 0 })
   lastCost: number;
 
@@ -73,18 +66,15 @@ export class IngredientStock {
   @Prop({ type: String, trim: true, default: null })
   storageLocation?: string | null;
 
-  // ✅ NUEVO: contabilidad rápida (no reemplaza el ledger)
   @Prop({ type: Number, default: 0 })
   totalIn: number;
 
   @Prop({ type: Number, default: 0 })
   totalOut: number;
 
-  // ✅ NUEVO: última vez que se movió stock
   @Prop({ type: Date, default: null })
   lastMovementAt?: Date | null;
 
-  // ✅ NUEVO: última vez que hiciste un recuento físico (si lo usás)
   @Prop({ type: Date, default: null })
   lastRecountAt?: Date | null;
 }
@@ -100,7 +90,6 @@ export class IngredientFoodProps {
   @Prop({ type: [String], default: [] })
   dietFlags: string[];
 
-  // merma estimada 0..1 (ej 0.05 = 5%)
   @Prop({ type: Number, default: 0, min: 0, max: 1 })
   wastePct: number;
 
@@ -116,62 +105,40 @@ export class IngredientFoodProps {
 
 @Schema({ timestamps: true })
 export class Ingredient {
-  // ------------------------
-  // Identidad
-  // ------------------------
   @Prop({ type: String, required: true, trim: true })
   name: string;
 
-  // 👇 nombre interno “corto” o como lo querés ver en el sistema (si difiere)
   @Prop({ type: String, trim: true, default: null })
   displayName?: string | null;
 
-  // ------------------------
-  // Unidad base (tu Unit enum)
-  // ------------------------
+  // ✅ NUEVO: branchId obligatorio
+  @Prop({ type: Types.ObjectId, ref: 'Branch', required: true, index: true })
+  branchId: Types.ObjectId;
+
   @Prop({ type: String, enum: Unit, required: true })
   baseUnit: Unit;
 
-  // ------------------------
-  // Proveedor principal (para compatibilidad con tu modelo actual)
-  // ------------------------
   @Prop({ type: Types.ObjectId, ref: 'Supplier', required: true, index: true })
   supplierId: Types.ObjectId;
 
-  // 👇 pedido clave: nombre en proveedor (para 1 proveedor principal)
   @Prop({ type: String, trim: true, default: null })
   name_for_supplier?: string | null;
 
-  // ------------------------
-  // Activo
-  // ------------------------
   @Prop({ type: Boolean, default: true })
   isActive: boolean;
 
-  // ------------------------
-  // Stock + costos
-  // ------------------------
   @Prop({ type: IngredientStock, default: () => ({}) })
   stock: IngredientStock;
 
   @Prop({ type: IngredientCost, default: () => ({}) })
   cost: IngredientCost;
 
-  // ------------------------
-  // Multi-proveedor (opcional, para crecer)
-  // ------------------------
   @Prop({ type: [IngredientSupplier], default: [] })
   suppliers: IngredientSupplier[];
 
-  // ------------------------
-  // Propiedades gastronómicas (opcional)
-  // ------------------------
   @Prop({ type: IngredientFoodProps, default: () => ({}) })
   food: IngredientFoodProps;
 
-  // ------------------------
-  // Tags/categoría (opcional)
-  // ------------------------
   @Prop({
     type: Types.ObjectId,
     ref: 'IngredientCategory',
@@ -189,20 +156,27 @@ export class Ingredient {
 
 export const IngredientSchema = SchemaFactory.createForClass(Ingredient);
 
-// Evita duplicados por proveedor principal (mismo nombre para mismo supplier)
-IngredientSchema.index({ supplierId: 1, name: 1 }, { unique: true });
+/**
+ * ✅ Unicidad principal por sucursal:
+ * mismo name NO se repite dentro del mismo branchId
+ */
+IngredientSchema.index({ branchId: 1, name: 1 }, { unique: true });
 
-// Si querés también evitar duplicado por "name_for_supplier" dentro del supplier principal:
+/**
+ * (Opcional) Si querés evitar duplicado de "name_for_supplier" dentro de la sucursal para el supplier principal:
+ * - esto permite que otra sucursal use el mismo name_for_supplier sin conflicto
+ */
 IngredientSchema.index(
-  { supplierId: 1, name_for_supplier: 1 },
+  { branchId: 1, supplierId: 1, name_for_supplier: 1 },
   {
     unique: true,
     partialFilterExpression: { name_for_supplier: { $type: 'string' } },
   },
 );
 
-// Para que no metas 2 veces el mismo supplier en suppliers[]
-IngredientSchema.index(
-  { _id: 1, 'suppliers.supplierId': 1 },
-  { unique: true, sparse: true },
-);
+/**
+ * Índices útiles para búsqueda/listado
+ */
+IngredientSchema.index({ branchId: 1, supplierId: 1 });
+IngredientSchema.index({ branchId: 1, isActive: 1 });
+IngredientSchema.index({ branchId: 1, tags: 1 });

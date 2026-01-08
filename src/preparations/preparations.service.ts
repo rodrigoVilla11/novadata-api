@@ -1,17 +1,20 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 
-import { Preparation } from './schemas/preparation.schema';
+import { Preparation, PrepItemType } from './schemas/preparation.schema';
 import { Ingredient } from '../ingredients/schemas/ingredients.schema';
 import { Unit } from '../ingredients/enums/unit.enum';
-import { PrepItemType } from './schemas/preparation.schema';
 
 type CreateOrUpdatePrepInput = {
+  branchId: string; // ✅ NUEVO (obligatorio)
+
   name: string;
   description?: string | null;
   supplierId?: string | null;
@@ -34,10 +37,13 @@ type CreateOrUpdatePrepInput = {
 
 @Injectable()
 export class PreparationsService {
+  private readonly logger = new Logger(PreparationsService.name);
+
   constructor(
     @InjectModel(Preparation.name) private prepModel: Model<Preparation>,
     @InjectModel(Ingredient.name) private ingModel: Model<Ingredient>,
   ) {}
+
 
   // ===========================================================================
   // CRUD
@@ -54,16 +60,43 @@ export class PreparationsService {
 
       return this.findOne(String((doc as any)._id));
     } catch (e: any) {
-      if (e?.code === 11000) throw new ConflictException('Preparation ya existe');
+      if (e?.code === 11000)
+        throw new ConflictException('Preparation ya existe para este branch');
       throw e;
     }
   }
 
-  async findAll(params?: { onlyActive?: boolean }) {
+  async findAll(params?: {
+    branchId?: string; // ✅ recomendado
+    onlyActive?: boolean;
+    supplierId?: string | null;
+    q?: string;
+  }) {
     const filter: any = {};
+
+    if (params?.branchId) filter.branchId = new Types.ObjectId(params.branchId);
     if (params?.onlyActive) filter.isActive = true;
 
-    const items = await this.prepModel.find(filter).sort({ name: 1 }).lean();
+    if (params?.supplierId !== undefined) {
+      filter.supplierId =
+        params.supplierId && String(params.supplierId).trim()
+          ? new Types.ObjectId(String(params.supplierId))
+          : null;
+    }
+
+    if (params?.q?.trim()) {
+      const qq = params.q.trim();
+      filter.$or = [
+        { name: { $regex: qq, $options: 'i' } },
+        { description: { $regex: qq, $options: 'i' } },
+      ];
+    }
+
+    const items = await this.prepModel
+      .find(filter)
+      .sort({ name: 1 })
+      .lean();
+
     return items.map((p: any) => this.toDto(p));
   }
 
@@ -74,13 +107,26 @@ export class PreparationsService {
   }
 
   async update(id: string, input: Partial<CreateOrUpdatePrepInput>) {
+    // ⚠️ no permitimos cambiar branchId por update (si querés, lo habilitamos explícito)
+    if ((input as any)?.branchId !== undefined) {
+      throw new ConflictException('No se permite cambiar branchId');
+    }
+
     const update = this.normalizePartialInput(input);
 
-    const doc = await this.prepModel.findByIdAndUpdate(id, update, { new: true });
-    if (!doc) throw new NotFoundException('Preparation not found');
+    try {
+      const doc = await this.prepModel.findByIdAndUpdate(id, update, {
+        new: true,
+      });
+      if (!doc) throw new NotFoundException('Preparation not found');
 
-    await this.recompute(id);
-    return this.findOne(id);
+      await this.recompute(id);
+      return this.findOne(id);
+    } catch (e: any) {
+      if (e?.code === 11000)
+        throw new ConflictException('Preparation ya existe para este branch');
+      throw e;
+    }
   }
 
   async setActive(id: string, isActive: boolean) {
@@ -163,7 +209,10 @@ export class PreparationsService {
 
     // ---- load child preps used by this prep
     const childPrepIds = (prep.items || [])
-      .filter((it: any) => it.type === PrepItemType.PREPARATION && it.preparationId)
+      .filter(
+        (it: any) =>
+          it.type === PrepItemType.PREPARATION && it.preparationId,
+      )
       .map((it: any) => it.preparationId);
 
     const childPreps = childPrepIds.length
@@ -207,7 +256,7 @@ export class PreparationsService {
           });
           childUnitCost = childRes.unitCost;
 
-          // persist child cache to speed up future computations
+          // persist child cache
           await this.prepModel.findByIdAndUpdate(childId, {
             computed: {
               ingredientsCost: childRes.ingredientsCost,
@@ -219,7 +268,7 @@ export class PreparationsService {
           });
         }
 
-        // qty is in child "yield unit" => qty * (cost per output unit)
+        // qty is in child output unit => qty * (cost per output unit)
         ingredientsCost += qty * childUnitCost;
         continue;
       }
@@ -229,8 +278,7 @@ export class PreparationsService {
     const waste = Math.max(0, Math.min(1, Number(prep.wastePct ?? 0) || 0));
     const extraCost = Math.max(0, Number(prep.extraCost ?? 0) || 0);
 
-    const wasteFactor = 1 + waste;
-    const totalCost = ingredientsCost * wasteFactor + extraCost;
+    const totalCost = ingredientsCost * (1 + waste) + extraCost;
 
     const yieldQty = Math.max(0, Number(prep.yieldQty ?? 0) || 0);
     const unitCost = yieldQty > 0 ? totalCost / yieldQty : 0;
@@ -243,6 +291,10 @@ export class PreparationsService {
   // ===========================================================================
 
   private normalizeInput(input: CreateOrUpdatePrepInput) {
+    const branchIdRaw = String(input.branchId || '').trim();
+    if (!branchIdRaw || !Types.ObjectId.isValid(branchIdRaw))
+      throw new ConflictException('branchId es requerido');
+
     const name = String(input.name || '').trim();
     if (!name) throw new ConflictException('name es requerido');
 
@@ -261,6 +313,7 @@ export class PreparationsService {
     const items = this.normalizeItems(input.items || []);
 
     return {
+      branchId: new Types.ObjectId(branchIdRaw),
       name,
       description: input.description ?? null,
       supplierId,
@@ -283,7 +336,8 @@ export class PreparationsService {
       update.name = name;
     }
 
-    if (input.description !== undefined) update.description = input.description ?? null;
+    if (input.description !== undefined)
+      update.description = input.description ?? null;
 
     if (input.supplierId !== undefined) {
       update.supplierId =
@@ -310,7 +364,8 @@ export class PreparationsService {
 
     if (input.currency !== undefined) update.currency = input.currency;
 
-    if (input.items !== undefined) update.items = this.normalizeItems(input.items || []);
+    if (input.items !== undefined)
+      update.items = this.normalizeItems(input.items || []);
 
     return update;
   }
@@ -334,7 +389,9 @@ export class PreparationsService {
       if (type === PrepItemType.INGREDIENT) {
         const ingredientIdRaw = String(it?.ingredientId || '').trim();
         if (!ingredientIdRaw)
-          throw new ConflictException('items: ingredientId requerido cuando type=INGREDIENT');
+          throw new ConflictException(
+            'items: ingredientId requerido cuando type=INGREDIENT',
+          );
 
         out.push({
           type,
@@ -349,7 +406,9 @@ export class PreparationsService {
       if (type === PrepItemType.PREPARATION) {
         const preparationIdRaw = String(it?.preparationId || '').trim();
         if (!preparationIdRaw)
-          throw new ConflictException('items: preparationId requerido cuando type=PREPARATION');
+          throw new ConflictException(
+            'items: preparationId requerido cuando type=PREPARATION',
+          );
 
         out.push({
           type,
@@ -364,8 +423,7 @@ export class PreparationsService {
       throw new ConflictException(`items: type inválido "${String(it?.type)}"`);
     }
 
-    // opcional: evitar duplicados exactos (mismo tipo + mismo id)
-    // (si querés permitir repetir y sumar, lo hacemos distinto)
+    // evitar duplicados exactos
     const seen = new Set<string>();
     for (const it of out) {
       const key =
@@ -373,7 +431,9 @@ export class PreparationsService {
           ? `I:${String(it.ingredientId)}`
           : `P:${String(it.preparationId)}`;
       if (seen.has(key))
-        throw new ConflictException('items: no repitas el mismo ingrediente/preparación. Sumá la qty.');
+        throw new ConflictException(
+          'items: no repitas el mismo ingrediente/preparación. Sumá la qty.',
+        );
       seen.add(key);
     }
 
@@ -387,6 +447,8 @@ export class PreparationsService {
   private toDto(p: any) {
     return {
       id: String(p._id),
+      branchId: p.branchId ? String(p.branchId) : null,
+
       name: p.name,
       description: p.description ?? null,
       supplierId: p.supplierId ? String(p.supplierId) : null,

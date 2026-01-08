@@ -84,8 +84,8 @@ export class Product {
   description?: string | null;
 
   // Multi-sucursal (opcional)
-  @Prop({ type: Types.ObjectId, ref: 'Branch', default: null, index: true })
-  branchId?: Types.ObjectId | null;
+  @Prop({ type: Types.ObjectId, ref: 'Branch', required: true, index: true })
+  branchId: Types.ObjectId;
 
   // Opcional: si querés agrupar por proveedor (no obligatorio en “vendibles”)
   @Prop({ type: Types.ObjectId, ref: 'Supplier', default: null, index: true })
@@ -174,8 +174,7 @@ export class Product {
 export const ProductSchema = SchemaFactory.createForClass(Product);
 
 // Evitar duplicados por branch/supplier (si es null, sparse evita romper)
-ProductSchema.index({ branchId: 1, supplierId: 1, name: 1 }, { unique: true, sparse: true });
-
+ProductSchema.index({ branchId: 1, supplierId: 1, name: 1 }, { unique: true });
 // SKU / barcode únicos si existen
 ProductSchema.index({ sku: 1 }, { unique: true, sparse: true });
 ProductSchema.index({ barcode: 1 }, { unique: true, sparse: true });

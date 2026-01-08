@@ -1,4 +1,10 @@
-import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 
@@ -10,10 +16,8 @@ type CreateIngredientInput = {
   baseUnit: Unit;
   supplierId: string;
 
-  // nuevo
   name_for_supplier?: string | null;
 
-  // opcionales “paquete completo”
   minQty?: number;
   trackStock?: boolean;
 
@@ -21,16 +25,14 @@ type CreateIngredientInput = {
   avgCost?: number;
   currency?: 'ARS' | 'USD';
 
-  // tags / notas
   tags?: string[];
   notes?: string | null;
 
-  // food props (si querés setear algo de entrada)
   isFood?: boolean;
 };
 
 @Injectable()
-export class IngredientsService{
+export class IngredientsService {
   private readonly logger = new Logger(IngredientsService.name);
 
   constructor(
@@ -38,35 +40,17 @@ export class IngredientsService{
   ) {}
 
   // ===========================================================================
-  // SEED TEST STOCK (DEV ONLY)
+  // CREATE (scoped)
   // ===========================================================================
-// async onModuleInit() {
-//   const res = await this.ingredientModel.updateMany(
-//     {},
-//     {
-//       $set: {
-//         'stock.trackStock': true,
-//         'stock.onHand': 0,
-//         'stock.totalIn': 0,
-//       },
-//       $currentDate: {
-//         'stock.lastMovementAt': true,
-//       },
-//     },
-//   );
+  async create(input: CreateIngredientInput, branchId: string) {
+    const bId = this.asObjectId(branchId);
 
-//   const matched = (res as any).matchedCount ?? (res as any).n ?? 0;
-//   const modified = (res as any).modifiedCount ?? (res as any).nModified ?? 0;
-
-//   this.logger.log(`Seed stock OK. matched=${matched} modified=${modified}`);
-// }
-
-  // ===========================================================================
-  // CREATE
-  // ===========================================================================
-  async create(input: CreateIngredientInput) {
     const name = String(input.name || '').trim();
-    const supplierObjectId = new Types.ObjectId(input.supplierId);
+    if (!name) throw new BadRequestException('name is required');
+
+    if (!input.baseUnit) throw new BadRequestException('baseUnit is required');
+
+    const supplierObjectId = this.asObjectId(input.supplierId);
 
     const nameForSupplier =
       input.name_for_supplier != null
@@ -81,6 +65,8 @@ export class IngredientsService{
 
     try {
       const doc = await this.ingredientModel.create({
+        branchId: bId,
+
         name,
         baseUnit: input.baseUnit,
         supplierId: supplierObjectId,
@@ -109,90 +95,127 @@ export class IngredientsService{
 
       return this.toDto(doc);
     } catch (e: any) {
-      if (e?.code === 11000)
-        throw new ConflictException(
-          'Ingredient already exists for this supplier',
-        );
+      if (e?.code === 11000) {
+        // Puede ser por (branchId,name) o (branchId,supplierId,name_for_supplier)
+        throw new ConflictException('Ingredient already exists');
+      }
       throw e;
     }
   }
 
   // ===========================================================================
-  // FIND ALL
+  // FIND ALL (scoped)
   // ===========================================================================
-  async findAll(params?: { supplierId?: string; activeOnly?: boolean }) {
-    const filter: any = {};
+  async findAll(params: {
+    branchId: string;
+    supplierId?: string;
+    activeOnly?: boolean;
+    q?: string;
+    tag?: string;
+  }) {
+    const filter: any = { branchId: this.asObjectId(params.branchId) };
 
-    if (params?.supplierId)
-      filter.supplierId = new Types.ObjectId(params.supplierId);
+    if (params.supplierId) filter.supplierId = this.asObjectId(params.supplierId);
+    if (params.activeOnly) filter.isActive = true;
 
-    if (params?.activeOnly) filter.isActive = true;
+    if (params.tag?.trim()) {
+      filter.tags = params.tag.trim().toLowerCase();
+    }
 
-    const items = await this.ingredientModel.find(filter).sort({ name: 1 }).lean();
+    if (params.q?.trim()) {
+      const q = params.q.trim();
+      filter.$or = [
+        { name: { $regex: q, $options: 'i' } },
+        { displayName: { $regex: q, $options: 'i' } },
+        { name_for_supplier: { $regex: q, $options: 'i' } },
+        { notes: { $regex: q, $options: 'i' } },
+        { tags: { $in: [new RegExp(q, 'i')] } },
+      ];
+    }
+
+    const items = await this.ingredientModel
+      .find(filter)
+      .sort({ name: 1 })
+      .lean();
 
     return items.map((i: any) => this.toDto(i));
   }
 
   // ===========================================================================
-  // SET ACTIVE
+  // FIND ONE (scoped)
   // ===========================================================================
-  async setActive(id: string, isActive: boolean) {
-    const doc = await this.ingredientModel.findByIdAndUpdate(
-      id,
+  async findOne(id: string, branchId: string) {
+    const doc = await this.ingredientModel
+      .findOne({ _id: this.asObjectId(id), branchId: this.asObjectId(branchId) })
+      .lean();
+
+    if (!doc) throw new NotFoundException('Ingredient not found');
+    return this.toDto(doc);
+  }
+
+  // ===========================================================================
+  // SET ACTIVE (scoped)
+  // ===========================================================================
+  async setActive(id: string, isActive: boolean, branchId: string) {
+    const doc = await this.ingredientModel.findOneAndUpdate(
+      { _id: this.asObjectId(id), branchId: this.asObjectId(branchId) },
       { isActive: Boolean(isActive) },
       { new: true },
     );
 
-    if (!doc) return null;
+    if (!doc) throw new NotFoundException('Ingredient not found');
     return this.toDto(doc);
   }
 
   // ===========================================================================
-  // SET MIN QTY (stock.minQty)
+  // SET MIN QTY (stock.minQty) (scoped)
   // ===========================================================================
-  async setMinQty(id: string, minQty: number) {
+  async setMinQty(id: string, minQty: number, branchId: string) {
     const qty = Math.max(0, Number(minQty) || 0);
 
-    const doc = await this.ingredientModel.findByIdAndUpdate(
-      id,
+    const doc = await this.ingredientModel.findOneAndUpdate(
+      { _id: this.asObjectId(id), branchId: this.asObjectId(branchId) },
       { 'stock.minQty': qty },
       { new: true },
     );
 
-    if (!doc) return null;
+    if (!doc) throw new NotFoundException('Ingredient not found');
     return this.toDto(doc);
   }
 
   // ===========================================================================
-  // SET NAME_FOR_SUPPLIER
+  // SET NAME_FOR_SUPPLIER (scoped)
   // ===========================================================================
-  async setNameForSupplier(id: string, name_for_supplier: string | null) {
-    const v =
-      name_for_supplier == null ? null : String(name_for_supplier).trim();
+  async setNameForSupplier(
+    id: string,
+    name_for_supplier: string | null,
+    branchId: string,
+  ) {
+    const v = name_for_supplier == null ? null : String(name_for_supplier).trim();
 
     try {
-      const doc = await this.ingredientModel.findByIdAndUpdate(
-        id,
+      const doc = await this.ingredientModel.findOneAndUpdate(
+        { _id: this.asObjectId(id), branchId: this.asObjectId(branchId) },
         { name_for_supplier: v },
         { new: true },
       );
-      if (!doc) return null;
+      if (!doc) throw new NotFoundException('Ingredient not found');
       return this.toDto(doc);
     } catch (e: any) {
-      if (e?.code === 11000)
-        throw new ConflictException(
-          'name_for_supplier already exists for this supplier',
-        );
+      if (e?.code === 11000) {
+        throw new ConflictException('name_for_supplier already exists');
+      }
       throw e;
     }
   }
 
   // ===========================================================================
-  // SET COST (lastCost / avgCost / currency)
+  // SET COST (lastCost / avgCost / currency) (scoped)
   // ===========================================================================
   async setCost(
     id: string,
     input: { lastCost?: number; avgCost?: number; currency?: 'ARS' | 'USD' },
+    branchId: string,
   ) {
     const update: any = {};
 
@@ -205,11 +228,13 @@ export class IngredientsService{
     if (input.currency)
       update['cost.currency'] = input.currency === 'USD' ? 'USD' : 'ARS';
 
-    const doc = await this.ingredientModel.findByIdAndUpdate(id, update, {
-      new: true,
-    });
+    const doc = await this.ingredientModel.findOneAndUpdate(
+      { _id: this.asObjectId(id), branchId: this.asObjectId(branchId) },
+      update,
+      { new: true },
+    );
 
-    if (!doc) return null;
+    if (!doc) throw new NotFoundException('Ingredient not found');
     return this.toDto(doc);
   }
 
@@ -222,6 +247,8 @@ export class IngredientsService{
 
       name: row.name,
       displayName: row.displayName ?? null,
+
+      branchId: String(row.branchId),
 
       baseUnit: row.baseUnit,
       supplierId: String(row.supplierId),
@@ -237,6 +264,11 @@ export class IngredientsService{
         minQty: row.stock?.minQty ?? 0,
         idealQty: row.stock?.idealQty ?? null,
         storageLocation: row.stock?.storageLocation ?? null,
+
+        totalIn: row.stock?.totalIn ?? 0,
+        totalOut: row.stock?.totalOut ?? 0,
+        lastMovementAt: row.stock?.lastMovementAt ?? null,
+        lastRecountAt: row.stock?.lastRecountAt ?? null,
       },
 
       cost: {
@@ -244,6 +276,10 @@ export class IngredientsService{
         avgCost: row.cost?.avgCost ?? 0,
         currency: row.cost?.currency ?? 'ARS',
       },
+
+      // por si ya lo usás/vas a usar
+      suppliers: Array.isArray(row.suppliers) ? row.suppliers : [],
+      categoryId: row.categoryId ? String(row.categoryId) : null,
 
       tags: Array.isArray(row.tags) ? row.tags : [],
       notes: row.notes ?? null,
@@ -261,5 +297,12 @@ export class IngredientsService{
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
+  }
+
+  private asObjectId(id: string) {
+    if (!id || !Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Invalid id');
+    }
+    return new Types.ObjectId(id);
   }
 }

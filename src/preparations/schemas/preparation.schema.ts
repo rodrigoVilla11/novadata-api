@@ -15,16 +15,12 @@ export class PreparationItem {
   @Prop({ type: String, enum: PrepItemType, required: true })
   type: PrepItemType;
 
-  // Uno u otro según "type"
   @Prop({ type: Types.ObjectId, ref: 'Ingredient', default: null, index: true })
   ingredientId?: Types.ObjectId | null;
 
   @Prop({ type: Types.ObjectId, ref: 'Preparation', default: null, index: true })
   preparationId?: Types.ObjectId | null;
 
-  // Cantidad en la unidad base del “ítem”
-  // - si type=INGREDIENT: qty está en ingredient.baseUnit
-  // - si type=PREPARATION: qty está en preparation.yieldUnit (o sea, en la “unidad de salida” de esa prep)
   @Prop({ type: Number, required: true, min: 0 })
   qty: number;
 
@@ -52,6 +48,10 @@ export class PreparationComputed {
 
 @Schema({ timestamps: true })
 export class Preparation {
+  // ✅ NUEVO: branchId obligatorio
+  @Prop({ type: Types.ObjectId, ref: 'Branch', required: true, index: true })
+  branchId: Types.ObjectId;
+
   @Prop({ type: String, required: true, trim: true })
   name: string;
 
@@ -87,4 +87,10 @@ export class Preparation {
 }
 
 export const PreparationSchema = SchemaFactory.createForClass(Preparation);
-PreparationSchema.index({ name: 1 }, { unique: true });
+
+// ✅ Unicidad por branch
+PreparationSchema.index({ branchId: 1, name: 1 }, { unique: true });
+
+// (opcional útil)
+PreparationSchema.index({ supplierId: 1 });
+PreparationSchema.index({ isActive: 1 });

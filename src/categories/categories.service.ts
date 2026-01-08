@@ -10,7 +10,6 @@ import { Category } from './schemas/category.schema';
 
 type CreateCategoryInput = {
   name: string;
-  branchId?: string | null;
   description?: string | null;
   imageUrl?: string | null;
   tags?: string[];
@@ -23,59 +22,82 @@ type UpdateCategoryInput = Partial<CreateCategoryInput> & {
 
 @Injectable()
 export class CategoriesService {
-  constructor(@InjectModel(Category.name) private readonly model: Model<Category>) {}
+  constructor(
+    @InjectModel(Category.name) private readonly model: Model<Category>,
+  ) {}
 
-  async create(input: CreateCategoryInput) {
-    const payload = this.normalizeCreate(input);
+  /**
+   * Crea categoría SIEMPRE dentro del branch del usuario (multi-tenant).
+   * branchId es obligatorio y viene del JWT (req.user.branchId).
+   */
+  async create(input: CreateCategoryInput, branchId: string) {
+    const payload = this.normalizeCreate(input, branchId);
 
     try {
       const doc = await this.model.create(payload);
       return this.toDto(doc);
     } catch (e: any) {
-      if (e?.code === 11000) throw new ConflictException('Category already exists');
+      if (e?.code === 11000)
+        throw new ConflictException('Category already exists');
       throw e;
     }
   }
 
-  async update(id: string, input: UpdateCategoryInput) {
-    const existing = await this.model.findById(id);
+  /**
+   * Update solo dentro del mismo branch del usuario.
+   * No se permite mover categorías entre branches.
+   */
+  async update(id: string, input: UpdateCategoryInput, branchId: string) {
+    const _id = this.asObjectId(id);
+    const bId = this.asObjectId(branchId);
+
+    const existing = await this.model.findOne({ _id, branchId: bId }).lean();
     if (!existing) throw new NotFoundException('Category not found');
 
     const merged = {
       name: existing.name,
-      branchId: existing.branchId ? String(existing.branchId) : null,
       description: existing.description ?? null,
       imageUrl: existing.imageUrl ?? null,
       tags: (existing.tags ?? []) as string[],
       sortOrder: Number(existing.sortOrder ?? 0),
+      isActive: existing.isActive ?? true,
       ...input,
     };
 
-    const payload = this.normalizeUpdate(merged);
+    const payload = this.normalizeUpdate(merged, branchId);
 
     try {
-      const doc = await this.model.findByIdAndUpdate(id, payload, { new: true });
+      const doc = await this.model.findOneAndUpdate(
+        { _id, branchId: bId },
+        payload,
+        { new: true },
+      );
       if (!doc) throw new NotFoundException('Category not found');
       return this.toDto(doc);
     } catch (e: any) {
-      if (e?.code === 11000) throw new ConflictException('Category already exists');
+      if (e?.code === 11000)
+        throw new ConflictException('Category already exists');
       throw e;
     }
   }
 
-  async findAll(params?: {
+  /**
+   * Lista categorías del branch del usuario.
+   */
+  async findAll(params: {
+    branchId: string;
     onlyActive?: boolean;
-    branchId?: string;
     q?: string;
     tag?: string;
   }) {
-    const filter: any = {};
+    const bId = this.asObjectId(params.branchId);
+    const filter: any = { branchId: bId };
 
-    if (params?.onlyActive) filter.isActive = true;
-    if (params?.branchId) filter.branchId = new Types.ObjectId(params.branchId);
-    if (params?.tag?.trim()) filter.tags = params.tag.trim().toLowerCase();
+    if (params.onlyActive) filter.isActive = true;
 
-    if (params?.q?.trim()) {
+    if (params.tag?.trim()) filter.tags = params.tag.trim().toLowerCase();
+
+    if (params.q?.trim()) {
       const q = params.q.trim();
       filter.$or = [
         { name: { $regex: q, $options: 'i' } },
@@ -92,15 +114,27 @@ export class CategoriesService {
     return items.map((x: any) => this.toDto(x));
   }
 
-  async findOne(id: string) {
-    const doc = await this.model.findById(id).lean();
+  /**
+   * Obtiene 1 categoría, solo si pertenece al branch del usuario.
+   */
+  async findOne(id: string, branchId: string) {
+    const _id = this.asObjectId(id);
+    const bId = this.asObjectId(branchId);
+
+    const doc = await this.model.findOne({ _id, branchId: bId }).lean();
     if (!doc) throw new NotFoundException('Category not found');
     return this.toDto(doc);
   }
 
-  async setActive(id: string, isActive: boolean) {
-    const doc = await this.model.findByIdAndUpdate(
-      id,
+  /**
+   * Activa/desactiva categoría, solo dentro del branch del usuario.
+   */
+  async setActive(id: string, isActive: boolean, branchId: string) {
+    const _id = this.asObjectId(id);
+    const bId = this.asObjectId(branchId);
+
+    const doc = await this.model.findOneAndUpdate(
+      { _id, branchId: bId },
       { isActive: !!isActive },
       { new: true },
     );
@@ -112,11 +146,9 @@ export class CategoriesService {
   // Helpers
   // ----------------
 
-  private normalizeCreate(input: CreateCategoryInput) {
+  private normalizeCreate(input: CreateCategoryInput, branchId: string) {
     const name = String(input.name || '').trim();
     if (!name) throw new BadRequestException('name is required');
-
-    const branchId = input.branchId ? new Types.ObjectId(input.branchId) : null;
 
     const tags = (input.tags ?? [])
       .map((t) => String(t || '').trim())
@@ -127,7 +159,7 @@ export class CategoriesService {
 
     return {
       name,
-      branchId,
+      branchId: this.asObjectId(branchId),
       description: input.description ? String(input.description).trim() : null,
       imageUrl: input.imageUrl ? String(input.imageUrl).trim() : null,
       tags,
@@ -136,11 +168,9 @@ export class CategoriesService {
     };
   }
 
-  private normalizeUpdate(input: any) {
+  private normalizeUpdate(input: any, branchId: string) {
     const name = String(input.name || '').trim();
     if (!name) throw new BadRequestException('name is required');
-
-    const branchId = input.branchId ? new Types.ObjectId(input.branchId) : null;
 
     const tags = (input.tags ?? [])
       .map((t) => String(t || '').trim())
@@ -151,7 +181,8 @@ export class CategoriesService {
 
     return {
       name,
-      branchId,
+      // 👇 se fuerza el branchId del usuario, no del body
+      branchId: this.asObjectId(branchId),
       description: input.description ? String(input.description).trim() : null,
       imageUrl: input.imageUrl ? String(input.imageUrl).trim() : null,
       tags,
@@ -164,7 +195,7 @@ export class CategoriesService {
     return {
       id: String(doc._id ?? doc.id),
       name: doc.name,
-      branchId: doc.branchId ? String(doc.branchId) : null,
+      branchId: String(doc.branchId),
       description: doc.description ?? null,
       imageUrl: doc.imageUrl ?? null,
       tags: Array.isArray(doc.tags) ? doc.tags : [],
@@ -178,5 +209,12 @@ export class CategoriesService {
   private num(v: any) {
     const n = Number(v ?? 0);
     return Number.isFinite(n) ? n : 0;
+  }
+
+  private asObjectId(id: string) {
+    if (!id || !Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Invalid id');
+    }
+    return new Types.ObjectId(id);
   }
 }

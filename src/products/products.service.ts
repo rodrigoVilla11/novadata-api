@@ -22,12 +22,10 @@ type CreateOrUpdateProductInput = {
   name: string;
   description?: string | null;
 
-  branchId?: string | null;
+  branchId: string; // ✅ requerido
   supplierId?: string | null;
 
   categoryId?: string | null;
-  // categoryName lo dejamos como “derivado” de Category (si te lo mandan, lo ignoramos)
-  categoryName?: string | null;
 
   sku?: string | null;
   barcode?: string | null;
@@ -47,8 +45,8 @@ type CreateOrUpdateProductInput = {
 
   currency?: Currency;
 
-  salePrice?: number | null; // manual
-  marginPct?: number | null; // 0..1
+  salePrice?: number | null;
+  marginPct?: number | null; // 0..1 (margen)
 
   tags?: string[];
   allergens?: Allergen[];
@@ -66,8 +64,9 @@ type CreateOrUpdateProductInput = {
 };
 
 @Injectable()
-export class ProductsService implements OnModuleInit {
+export class ProductsService {
   private readonly logger = new Logger(ProductsService.name);
+
 
   constructor(
     @InjectModel(Product.name) private readonly productModel: Model<Product>,
@@ -79,44 +78,10 @@ export class ProductsService implements OnModuleInit {
     private readonly categoryModel: Model<Category>,
   ) {}
 
-  /**
-   * Auto-run on startup (opt-in with env var)
-   *
-   * ENV:
-   * - PRODUCTS_BOOTSTRAP_ADD_COMMON_ITEMS=1
-   * - PRODUCTS_BOOTSTRAP_DRY_RUN=1 (opcional)
-   * - PRODUCTS_BOOTSTRAP_RECOMPUTE=1 (opcional)
-   * - PRODUCTS_BOOTSTRAP_ONLY_ACTIVE=1 (opcional)
-   * - PRODUCTS_BOOTSTRAP_BRANCH_ID=... (opcional)
-   */
-  async onModuleInit() {
-    try {
-      this.logger.warn(
-        'Products bootstrap: adding common items to all products...',
-      );
 
-      const res = await this.addCommonItemsToAllProducts({
-        // poné lo que quieras por defecto:
-        onlyActive: false, // o true si querés
-        recompute: false, // o true si querés que recalculen computed
-        dryRun: false,
-        // branchId: '...'   // si querés limitar
-      });
-
-      this.logger.warn(
-        `Products bootstrap done: total=${res.total} touched=${res.touched} addedItems=${res.addedItems}`,
-      );
-    } catch (e: any) {
-      // Importante: no romper el startup
-      this.logger.error(
-        `Products bootstrap failed: ${e?.message || e}`,
-        e?.stack || undefined,
-      );
-    }
-  }
 
   // =====================================================================
-  // Public CRUD
+  // CRUD
   // =====================================================================
 
   async create(input: CreateOrUpdateProductInput) {
@@ -142,7 +107,7 @@ export class ProductsService implements OnModuleInit {
     const merged = {
       ...this.toPlainForEdit(existing),
       ...input,
-    } as CreateOrUpdateProductInput;
+    } as any as CreateOrUpdateProductInput;
 
     const payload = await this.normalizeInput(merged);
     const computed = await this.computeCosts(payload);
@@ -171,7 +136,7 @@ export class ProductsService implements OnModuleInit {
     categoryId?: string;
     q?: string;
     tag?: string;
-    sellable?: boolean; 
+    sellable?: boolean;
   }) {
     const filter: any = {};
 
@@ -179,12 +144,13 @@ export class ProductsService implements OnModuleInit {
     if (params?.sellable != null) filter.isSellable = !!params.sellable;
 
     if (params?.branchId) filter.branchId = new Types.ObjectId(params.branchId);
-    if (params?.supplierId)
-      filter.supplierId = new Types.ObjectId(params.supplierId);
-    if (params?.categoryId)
-      filter.categoryId = new Types.ObjectId(params.categoryId);
+    if (params?.supplierId) filter.supplierId = new Types.ObjectId(params.supplierId);
+    if (params?.categoryId) filter.categoryId = new Types.ObjectId(params.categoryId);
 
-    if (params?.tag?.trim()) filter.tags = params.tag.trim().toLowerCase();
+    if (params?.tag?.trim()) {
+      const tag = params.tag.trim().toLowerCase();
+      filter.tags = { $in: [tag] }; // ✅ tags es array
+    }
 
     if (params?.q?.trim()) {
       const q = params.q.trim();
@@ -225,16 +191,9 @@ export class ProductsService implements OnModuleInit {
     const payload = await this.normalizeInput({
       name: (doc as any).name,
       description: (doc as any).description ?? null,
-
-      branchId: (doc as any).branchId ? String((doc as any).branchId) : null,
-      supplierId: (doc as any).supplierId
-        ? String((doc as any).supplierId)
-        : null,
-
-      categoryId: (doc as any).categoryId
-        ? String((doc as any).categoryId)
-        : null,
-      categoryName: (doc as any).categoryName ?? null,
+      branchId: String((doc as any).branchId), // ✅ requerido
+      supplierId: (doc as any).supplierId ? String((doc as any).supplierId) : null,
+      categoryId: (doc as any).categoryId ? String((doc as any).categoryId) : null,
 
       sku: (doc as any).sku ?? null,
       barcode: (doc as any).barcode ?? null,
@@ -264,7 +223,7 @@ export class ProductsService implements OnModuleInit {
       galleryUrls: (doc as any).galleryUrls ?? [],
 
       items: (doc as any).items ?? [],
-    });
+    } as any);
 
     const computed = await this.computeCosts(payload);
 
@@ -313,10 +272,8 @@ export class ProductsService implements OnModuleInit {
   ] as const;
 
   private itemKey(it: any) {
-    if (it?.type === ProductItemType.INGREDIENT)
-      return `I:${String(it.ingredientId)}`;
-    if (it?.type === ProductItemType.PREPARATION)
-      return `P:${String(it.preparationId)}`;
+    if (it?.type === ProductItemType.INGREDIENT) return `I:${String(it.ingredientId)}`;
+    if (it?.type === ProductItemType.PREPARATION) return `P:${String(it.preparationId)}`;
     return `?:${String(it?.type)}`;
   }
 
@@ -330,9 +287,7 @@ export class ProductsService implements OnModuleInit {
     if (opts?.onlyActive) filter.isActive = true;
     if (opts?.branchId) filter.branchId = new Types.ObjectId(opts.branchId);
 
-    const cursor = this.productModel
-      .find(filter, { items: 1, name: 1 })
-      .cursor();
+    const cursor = this.productModel.find(filter, { items: 1, name: 1 }).cursor();
 
     let total = 0;
     let touched = 0;
@@ -344,9 +299,7 @@ export class ProductsService implements OnModuleInit {
       const items = Array.isArray(p.items) ? p.items : [];
       const seen = new Set(items.map((x: any) => this.itemKey(x)));
 
-      const toAdd = this.COMMON_ITEMS_TO_ADD.filter(
-        (x) => !seen.has(this.itemKey(x)),
-      );
+      const toAdd = this.COMMON_ITEMS_TO_ADD.filter((x) => !seen.has(this.itemKey(x)));
       if (!toAdd.length) continue;
 
       touched++;
@@ -382,6 +335,12 @@ export class ProductsService implements OnModuleInit {
     const name = String(input.name || '').trim();
     if (!name) throw new BadRequestException('name is required');
 
+    // ✅ branchId requerido
+    const branchIdRaw = String((input as any).branchId || '').trim();
+    if (!branchIdRaw) throw new BadRequestException('branchId is required');
+
+    const branchId = new Types.ObjectId(branchIdRaw);
+
     const yieldQty = this.num(input.yieldQty ?? 1);
     if (!Number.isFinite(yieldQty) || yieldQty <= 0) {
       throw new BadRequestException('yieldQty must be > 0');
@@ -398,10 +357,10 @@ export class ProductsService implements OnModuleInit {
     const marginPct =
       input.marginPct == null ? null : this.clamp01(this.num(input.marginPct));
 
-    const branchId = input.branchId ? new Types.ObjectId(input.branchId) : null;
-    const supplierId = input.supplierId
-      ? new Types.ObjectId(input.supplierId)
-      : null;
+    const supplierId =
+      input.supplierId && String(input.supplierId).trim()
+        ? new Types.ObjectId(String(input.supplierId))
+        : null;
 
     const sku = input.sku ? String(input.sku).trim() : null;
     const barcode = input.barcode ? String(input.barcode).trim() : null;
@@ -410,12 +369,8 @@ export class ProductsService implements OnModuleInit {
     const isProduced = input.isProduced ?? true;
 
     const portionSize =
-      input.portionSize == null
-        ? null
-        : Math.max(0, this.num(input.portionSize));
-    const portionLabel = input.portionLabel
-      ? String(input.portionLabel).trim()
-      : null;
+      input.portionSize == null ? null : Math.max(0, this.num(input.portionSize));
+    const portionLabel = input.portionLabel ? String(input.portionLabel).trim() : null;
 
     const tags = (input.tags ?? [])
       .map((t) => String(t || '').trim())
@@ -433,10 +388,7 @@ export class ProductsService implements OnModuleInit {
       const type = it.type as any as ProductItemType;
       const qty = this.num(it.qty);
 
-      if (
-        type !== ProductItemType.INGREDIENT &&
-        type !== ProductItemType.PREPARATION
-      ) {
+      if (type !== ProductItemType.INGREDIENT && type !== ProductItemType.PREPARATION) {
         throw new BadRequestException('Invalid item type');
       }
       if (!Number.isFinite(qty) || qty <= 0) {
@@ -458,14 +410,10 @@ export class ProductsService implements OnModuleInit {
           : null;
 
       if (type === ProductItemType.INGREDIENT && !ingredientId) {
-        throw new BadRequestException(
-          'ingredientId is required for INGREDIENT item',
-        );
+        throw new BadRequestException('ingredientId is required for INGREDIENT item');
       }
       if (type === ProductItemType.PREPARATION && !preparationId) {
-        throw new BadRequestException(
-          'preparationId is required for PREPARATION item',
-        );
+        throw new BadRequestException('preparationId is required for PREPARATION item');
       }
 
       return {
@@ -484,13 +432,11 @@ export class ProductsService implements OnModuleInit {
         it.type === ProductItemType.INGREDIENT
           ? `I:${String(it.ingredientId)}`
           : `P:${String(it.preparationId)}`;
-      if (seen.has(key))
-        throw new BadRequestException('Duplicated item in items[]');
+      if (seen.has(key)) throw new BadRequestException('Duplicated item in items[]');
       seen.add(key);
     }
 
-    if (!items.length)
-      throw new BadRequestException('At least 1 item is required');
+    if (!items.length) throw new BadRequestException('At least 1 item is required');
 
     // -----------------------
     // Category: validate + hydrate categoryName
@@ -508,12 +454,8 @@ export class ProductsService implements OnModuleInit {
 
       if (!cat) throw new BadRequestException('categoryId not found');
 
-      // regla simple: si el producto tiene branchId, y la categoría tiene branchId,
-      // deben coincidir (si querés permitir global->branch, se ajusta)
-      const catBranch = (cat as any).branchId
-        ? String((cat as any).branchId)
-        : null;
-      const prodBranch = branchId ? String(branchId) : null;
+      const catBranch = (cat as any).branchId ? String((cat as any).branchId) : null;
+      const prodBranch = String(branchId);
 
       if (catBranch && prodBranch && catBranch !== prodBranch) {
         throw new BadRequestException('categoryId belongs to another branch');
@@ -521,7 +463,6 @@ export class ProductsService implements OnModuleInit {
 
       categoryName = String((cat as any).name || '').trim() || null;
     } else {
-      // sin categoryId => limpiamos categoryName para evitar inconsistencias
       categoryId = null;
       categoryName = null;
     }
@@ -605,19 +546,13 @@ export class ProductsService implements OnModuleInit {
 
       if (it.type === ProductItemType.INGREDIENT) {
         const ing = ingById.get(String(it.ingredientId));
-        if (!ing)
-          throw new BadRequestException(
-            `Ingredient not found: ${String(it.ingredientId)}`,
-          );
+        if (!ing) throw new BadRequestException(`Ingredient not found: ${String(it.ingredientId)}`);
 
         const unitCost = this.num(ing?.cost?.lastCost ?? 0);
         ingredientsCost += qty * unitCost;
       } else {
         const prep = prepById.get(String(it.preparationId));
-        if (!prep)
-          throw new BadRequestException(
-            `Preparation not found: ${String(it.preparationId)}`,
-          );
+        if (!prep) throw new BadRequestException(`Preparation not found: ${String(it.preparationId)}`);
 
         const unitCost = this.num(prep?.computed?.unitCost ?? 0);
         ingredientsCost += qty * unitCost;
@@ -629,24 +564,19 @@ export class ProductsService implements OnModuleInit {
     const packagingCost = Math.max(0, this.num(payload.packagingCost ?? 0));
     const yieldQty = Math.max(0.000001, this.num(payload.yieldQty ?? 1));
 
-    const totalCost =
-      ingredientsCost * (1 + wastePct) + extraCost + packagingCost;
+    const totalCost = ingredientsCost * (1 + wastePct) + extraCost + packagingCost;
     const unitCost = totalCost / yieldQty;
 
-    const salePrice =
-      payload.salePrice == null
-        ? null
-        : Math.max(0, this.num(payload.salePrice));
-    const marginPct =
-      payload.marginPct == null
-        ? null
-        : this.clamp01(this.num(payload.marginPct));
+    const salePrice = payload.salePrice == null ? null : Math.max(0, this.num(payload.salePrice));
+    const marginPct = payload.marginPct == null ? null : this.clamp01(this.num(payload.marginPct));
 
+    // ✅ suggestedPrice usando margen real (no markup):
+    // price = cost / (1 - margin)
     const suggestedPrice =
       salePrice != null
         ? null
-        : marginPct != null
-          ? unitCost * (1 + marginPct)
+        : marginPct != null && marginPct < 1
+          ? unitCost / (1 - marginPct)
           : null;
 
     const marginPctUsed = salePrice == null ? marginPct : null;
@@ -728,8 +658,7 @@ export class ProductsService implements OnModuleInit {
         suggestedPrice: doc?.computed?.suggestedPrice ?? null,
         marginPctUsed: doc?.computed?.marginPctUsed ?? null,
         grossMarginPct: doc?.computed?.grossMarginPct ?? null,
-        currency:
-          doc?.computed?.currency || (doc.currency as Currency) || 'ARS',
+        currency: doc?.computed?.currency || (doc.currency as Currency) || 'ARS',
         computedAt: doc?.computed?.computedAt ?? null,
       },
 
@@ -747,7 +676,6 @@ export class ProductsService implements OnModuleInit {
       supplierId: doc.supplierId ? String(doc.supplierId) : null,
 
       categoryId: doc.categoryId ? String(doc.categoryId) : null,
-      categoryName: doc.categoryName ?? null,
 
       sku: doc.sku ?? null,
       barcode: doc.barcode ?? null,

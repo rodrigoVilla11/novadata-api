@@ -6,7 +6,9 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from 'src/auth/roles.decorator';
@@ -40,28 +42,53 @@ type CreateIngredientBody = {
 export class IngredientsController {
   constructor(private readonly ingredientsService: IngredientsService) {}
 
+  private getBranchIdOrThrow(req: any) {
+    const branchId = req?.user?.branchId;
+    if (!branchId) throw new UnauthorizedException('Missing branchId in token');
+    return String(branchId);
+  }
+
   // ===========================================================================
   // CREATE
   // POST /ingredients
   // ===========================================================================
   @Post()
-  async create(@Body() body: CreateIngredientBody) {
-    return this.ingredientsService.create(body);
+  async create(@Req() req: any, @Body() body: CreateIngredientBody) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.ingredientsService.create(body, branchId);
   }
 
   // ===========================================================================
   // LIST
-  // GET /ingredients?supplierId=...&activeOnly=1
+  // GET /ingredients?supplierId=...&activeOnly=1&q=...&tag=...
   // ===========================================================================
   @Get()
   async findAll(
+    @Req() req: any,
     @Query('supplierId') supplierId?: string,
     @Query('activeOnly') activeOnly?: string,
+    @Query('q') q?: string,
+    @Query('tag') tag?: string,
   ) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.ingredientsService.findAll({
+      branchId,
       supplierId: supplierId || undefined,
       activeOnly: activeOnly === '1' || activeOnly === 'true',
+      q: q || undefined,
+      tag: tag || undefined,
     });
+  }
+
+  // ===========================================================================
+  // FIND ONE
+  // GET /ingredients/:id
+  // ===========================================================================
+  @Get(':id')
+  async findOne(@Req() req: any, @Param('id') id: string) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.ingredientsService.findOne(id, branchId);
   }
 
   // ===========================================================================
@@ -71,10 +98,12 @@ export class IngredientsController {
   // ===========================================================================
   @Patch(':id/active')
   async setActive(
+    @Req() req: any,
     @Param('id') id: string,
     @Body() body: { isActive: boolean },
   ) {
-    return this.ingredientsService.setActive(id, Boolean(body?.isActive));
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.ingredientsService.setActive(id, Boolean(body?.isActive), branchId);
   }
 
   // ===========================================================================
@@ -84,10 +113,12 @@ export class IngredientsController {
   // ===========================================================================
   @Patch(':id/min-qty')
   async setMinQty(
+    @Req() req: any,
     @Param('id') id: string,
     @Body() body: { minQty: number },
   ) {
-    return this.ingredientsService.setMinQty(id, Number(body?.minQty));
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.ingredientsService.setMinQty(id, Number(body?.minQty), branchId);
   }
 
   // ===========================================================================
@@ -97,12 +128,16 @@ export class IngredientsController {
   // ===========================================================================
   @Patch(':id/name-for-supplier')
   async setNameForSupplier(
+    @Req() req: any,
     @Param('id') id: string,
     @Body() body: { name_for_supplier: string | null },
   ) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.ingredientsService.setNameForSupplier(
       id,
       body?.name_for_supplier ?? null,
+      branchId,
     );
   }
 
@@ -113,10 +148,12 @@ export class IngredientsController {
   // ===========================================================================
   @Patch(':id/cost')
   async setCost(
+    @Req() req: any,
     @Param('id') id: string,
     @Body()
     body: { lastCost?: number; avgCost?: number; currency?: 'ARS' | 'USD' },
   ) {
-    return this.ingredientsService.setCost(id, body || {});
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.ingredientsService.setCost(id, body || {}, branchId);
   }
 }

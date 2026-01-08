@@ -8,9 +8,14 @@ export class Category {
   @Prop({ required: true, trim: true })
   name: string;
 
-  // Multi-sucursal opcional (si null = global)
-  @Prop({ type: Types.ObjectId, ref: 'Branch', default: null, index: true })
-  branchId?: Types.ObjectId | null;
+  // ✅ Obligatorio: siempre pertenece a una sucursal
+  @Prop({
+    type: Types.ObjectId,
+    ref: 'Branch',
+    required: true,
+    index: true,
+  })
+  branchId: Types.ObjectId;
 
   @Prop({ type: String, default: null, trim: true })
   description?: string | null;
@@ -30,7 +35,8 @@ export class Category {
 
 export const CategorySchema = SchemaFactory.createForClass(Category);
 
-// Evita duplicados por branch (si branchId null, sparse permite globales)
-CategorySchema.index({ branchId: 1, name: 1 }, { unique: true, sparse: true });
+// ✅ Unicidad por branch: mismo name NO se repite dentro del mismo branchId
+CategorySchema.index({ branchId: 1, name: 1 }, { unique: true });
+
 CategorySchema.index({ name: 1 });
 CategorySchema.index({ tags: 1 });
