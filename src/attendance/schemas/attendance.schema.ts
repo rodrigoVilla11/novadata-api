@@ -5,6 +5,9 @@ export type AttendanceDocument = HydratedDocument<AttendanceRecord>;
 
 @Schema({ timestamps: true })
 export class AttendanceRecord {
+  @Prop({ type: Types.ObjectId, ref: "Branch", required: true, index: true })
+  branchId!: Types.ObjectId; // ✅ NUEVO
+
   @Prop({ required: true, trim: true })
   dateKey: string; // YYYY-MM-DD
 
@@ -31,5 +34,10 @@ export class AttendanceRecord {
 }
 
 export const AttendanceSchema = SchemaFactory.createForClass(AttendanceRecord);
-AttendanceSchema.index({ dateKey: 1, employeeId: 1 }, { unique: true });
-AttendanceSchema.index({ employeeId: 1, dateKey: 1 });
+
+// ✅ Unicidad por branch + dateKey + employee
+AttendanceSchema.index({ branchId: 1, dateKey: 1, employeeId: 1 }, { unique: true });
+
+// ✅ Queries típicas
+AttendanceSchema.index({ branchId: 1, dateKey: 1 });
+AttendanceSchema.index({ branchId: 1, employeeId: 1, dateKey: 1 });

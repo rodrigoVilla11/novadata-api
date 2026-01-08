@@ -29,6 +29,9 @@ import { FinanceCategoriesModule } from './finance/categories/finance-categories
 import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
 import { FinanceStatsModule } from './finance/stats/finance-stats.module';
 import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
+import { SettingsModule } from './settings/settings.module';
+import { BranchesModule } from './branches/branches.module';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
@@ -41,7 +44,7 @@ import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
         uri: config.get<string>('MONGO_URI'),
       }),
     }),
-
+    ScheduleModule.forRoot(),
     UsersModule,
     AuthModule,
     SuppliersModule,
@@ -68,7 +71,9 @@ import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
     FinanceCategoriesModule,
     FinanceClosingsModule,
     FinanceStatsModule,
-    PurchaseOrdersModule
+    PurchaseOrdersModule,
+    SettingsModule,
+    BranchesModule,
   ],
 })
 export class AppModule {}

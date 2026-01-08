@@ -30,7 +30,7 @@ type CreateIngredientInput = {
 };
 
 @Injectable()
-export class IngredientsService implements OnModuleInit {
+export class IngredientsService{
   private readonly logger = new Logger(IngredientsService.name);
 
   constructor(
@@ -40,29 +40,26 @@ export class IngredientsService implements OnModuleInit {
   // ===========================================================================
   // SEED TEST STOCK (DEV ONLY)
   // ===========================================================================
-  async onModuleInit() {
+// async onModuleInit() {
+//   const res = await this.ingredientModel.updateMany(
+//     {},
+//     {
+//       $set: {
+//         'stock.trackStock': true,
+//         'stock.onHand': 0,
+//         'stock.totalIn': 0,
+//       },
+//       $currentDate: {
+//         'stock.lastMovementAt': true,
+//       },
+//     },
+//   );
 
-    const res = await this.ingredientModel.updateMany(
-      {},
-      {
-        $set: {
-          'stock.trackStock': true,
-        },
-        $inc: {
-          'stock.onHand': 100,
-          'stock.totalIn': 100,
-        },
-        $currentDate: {
-          'stock.lastMovementAt': true,
-        },
-      },
-    );
+//   const matched = (res as any).matchedCount ?? (res as any).n ?? 0;
+//   const modified = (res as any).modifiedCount ?? (res as any).nModified ?? 0;
 
-    const matched = (res as any).matchedCount ?? (res as any).n ?? 0;
-    const modified = (res as any).modifiedCount ?? (res as any).nModified ?? 0;
-
-    this.logger.log(`Seed stock OK. matched=${matched} modified=${modified}`);
-  }
+//   this.logger.log(`Seed stock OK. matched=${matched} modified=${modified}`);
+// }
 
   // ===========================================================================
   // CREATE
