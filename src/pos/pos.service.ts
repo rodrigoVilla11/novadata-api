@@ -21,6 +21,14 @@ function assertDateKey(dateKey: string) {
   }
 }
 
+function getBranchIdOrThrow(user: any) {
+  const branchId = user?.branchId ?? null;
+  if (!branchId || String(branchId).trim() === '') {
+    throw new BadRequestException('branchId is required (missing in req.user)');
+  }
+  return String(branchId);
+}
+
 @Injectable()
 export class PosService {
   constructor(
@@ -32,12 +40,18 @@ export class PosService {
   // Cart = Order(DRAFT)
   // ============================
 
-  async createCart(dto: {
-    customerId?: string | null;
-    note?: string | null;
-    items?: Array<{ productId: string; qty: number; note?: string | null }>;
-  }) {
+  async createCart(
+    user: any,
+    dto: {
+      customerId?: string | null;
+      note?: string | null;
+      items?: Array<{ productId: string; qty: number; note?: string | null }>;
+    },
+  ) {
+    const branchId = getBranchIdOrThrow(user);
+
     return this.ordersService.create({
+      branchId,
       source: 'POS',
       customerId: dto.customerId ?? null,
       note: dto.note ?? null,
@@ -45,12 +59,16 @@ export class PosService {
     });
   }
 
-  async getCart(orderId: string) {
-    return this.ordersService.findOne(orderId);
+  async getCart(user: any, orderId: string) {
+    const branchId = getBranchIdOrThrow(user);
+    return this.ordersService.findOne(branchId, orderId);
   }
 
-  async listCarts(params?: { status?: OrderStatus; limit?: number }) {
+  async listCarts(user: any, params?: { status?: OrderStatus; limit?: number }) {
+    const branchId = getBranchIdOrThrow(user);
+
     return this.ordersService.findAll({
+      branchId,
       source: 'POS',
       status: params?.status ?? OrderStatus.DRAFT,
       limit: params?.limit ?? 50,
@@ -58,25 +76,31 @@ export class PosService {
   }
 
   async setCartItems(
+    user: any,
     orderId: string,
     items: Array<{ productId: string; qty: number; note?: string | null }>,
   ) {
-    return this.ordersService.setItems(orderId, items);
+    const branchId = getBranchIdOrThrow(user);
+    return this.ordersService.setItems(branchId, orderId, items);
   }
 
-  async setCartNote(orderId: string, note: string | null) {
-    return this.ordersService.setNote(orderId, note);
+  async setCartNote(user: any, orderId: string, note: string | null) {
+    const branchId = getBranchIdOrThrow(user);
+    return this.ordersService.setNote(branchId, orderId, note);
   }
 
-  async cancelCart(orderId: string) {
-    return this.ordersService.cancel(orderId);
+  async cancelCart(user: any, orderId: string) {
+    const branchId = getBranchIdOrThrow(user);
+    return this.ordersService.cancel(branchId, orderId);
   }
 
   // ============================
   // Checkout = Order -> Sale -> Pay
   // ============================
-  // pos.service.ts (solo el método checkoutCart)
 
+  /**
+   * Checkout de un carrito existente (Order POS)
+   */
   async checkoutCart(
     user: any,
     orderId: string,
@@ -88,6 +112,7 @@ export class PosService {
       categoryId?: string | null;
     },
   ) {
+    const branchId = getBranchIdOrThrow(user);
     assertDateKey(dto?.dateKey);
 
     if (!orderId?.trim()) throw new BadRequestException('orderId is required');
@@ -95,14 +120,12 @@ export class PosService {
       throw new BadRequestException('payments[] is required');
     }
 
-    const order = await this.ordersService.findOne(orderId);
+    const order = await this.ordersService.findOne(branchId, orderId);
 
     if (order.source !== 'POS') {
       throw new BadRequestException('Order source must be POS');
     }
 
-    // Permitimos checkout desde DRAFT, pero lo “cerramos” (ACCEPT) antes de pagar.
-    // Si tu accept() no es idempotente, ajustalo para que si ya está ACCEPTED devuelva ok.
     if (order.status === OrderStatus.CANCELLED) {
       throw new BadRequestException('Cart is CANCELLED');
     }
@@ -112,18 +135,17 @@ export class PosService {
 
     // 1) Cerrar carrito (idempotente)
     if (order.status === OrderStatus.DRAFT) {
-      await this.ordersService.accept(orderId);
+      await this.ordersService.accept(branchId, orderId);
     } else if (order.status !== OrderStatus.ACCEPTED) {
-      // si tenés otros estados válidos para checkout, agregalos acá
       throw new BadRequestException(
         `Cart must be DRAFT or ACCEPTED (is ${order.status})`,
       );
     }
 
     // 2) Obtener o crear Sale desde Order (idempotente por orderId)
-    let sale = await this.salesService.findByOrderId(orderId);
+    let sale = await this.salesService.findByOrderId(branchId, orderId);
     if (!sale) {
-      sale = await this.salesService.createFromOrder(user, orderId);
+      sale = await this.salesService.createFromOrder(user, branchId, orderId);
     }
 
     // 3) Si ya está pagada, devolvemos tal cual (idempotente)
@@ -140,14 +162,12 @@ export class PosService {
       };
     }
 
-    // si está voided, no permitimos pagar
     if (sale.status === SaleStatus.VOIDED || (sale as any).voided) {
       throw new BadRequestException('Sale is VOIDED');
     }
 
     // 4) Pagar (caja + stock OUT + marcar PAID)
-    //    IMPORTANTE: SalesService.pay debe ser idempotente (lock DRAFT->PAID) para evitar doble cobro por retries.
-    const paid = await this.salesService.pay(user, sale.id, {
+    const paid = await this.salesService.pay(user, branchId, sale.id, {
       dateKey: dto.dateKey,
       payments: dto.payments.map((p) => ({
         method: p.method,
@@ -171,13 +191,25 @@ export class PosService {
     };
   }
 
-  // opcional: lookup rápido de venta por order (útil para frontend POS)
-  async getSaleForCart(orderId: string) {
-    const sale = await this.salesService.findByOrderId(orderId);
+  /**
+   * Lookup rápido de venta por order (útil para frontend POS)
+   */
+  async getSaleForCart(user: any, orderId: string) {
+    const branchId = getBranchIdOrThrow(user);
+    const sale = await this.salesService.findByOrderId(branchId, orderId);
     if (!sale) throw new NotFoundException('Sale not found for this order');
     return sale;
   }
+
+  /**
+   * Checkout “directo” (sin carrito previo):
+   * - crea order POS
+   * - acepta
+   * - crea sale
+   * - paga
+   */
   async checkout(user: any, dto: PosCheckoutDto) {
+    const branchId = getBranchIdOrThrow(user);
     assertDateKey(dto.dateKey);
 
     if (!Array.isArray(dto.items) || dto.items.length === 0) {
@@ -189,6 +221,7 @@ export class PosService {
 
     // 1) crear order POS
     const order = await this.ordersService.create({
+      branchId,
       source: 'POS',
       customerId: dto.customerId ?? null,
       note: dto.note ?? null,
@@ -196,13 +229,13 @@ export class PosService {
     });
 
     // 2) aceptar order
-    await this.ordersService.accept(order.id);
+    await this.ordersService.accept(branchId, order.id);
 
     // 3) crear sale desde order
-    const sale = await this.salesService.createFromOrder(user, order.id);
+    const sale = await this.salesService.createFromOrder(user, branchId, order.id);
 
     // 4) cobrar sale (caja + stock + mark paid)
-    const paid = await this.salesService.pay(user, sale.id, {
+    const paid = await this.salesService.pay(user, branchId, sale.id, {
       dateKey: dto.dateKey,
       payments: dto.payments.map((p) => ({
         method: p.method,
@@ -214,9 +247,6 @@ export class PosService {
       categoryId: dto.categoryId ?? null,
     });
 
-    return {
-      order,
-      sale: paid,
-    };
+    return { order, sale: paid };
   }
 }

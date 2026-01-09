@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -23,44 +24,73 @@ import { AttachInvoiceDto } from "./dto/attach-invoice.dto";
 export class PurchaseOrdersController {
   constructor(private readonly service: PurchaseOrdersService) {}
 
+  private getBranchIdOrThrow(req: any) {
+    const branchId = req?.user?.branchId ? String(req.user.branchId) : "";
+    if (!branchId) throw new BadRequestException("branchId is required");
+    return branchId;
+  }
+
   @Post()
-  create(@Body() dto: CreatePurchaseOrderDto) {
-    return this.service.create(dto);
+  create(@Req() req: any, @Body() dto: CreatePurchaseOrderDto) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.create({ ...dto, branchId });
   }
 
   @Get()
   findAll(
+    @Req() req: any,
     @Query("supplierId") supplierId?: string,
     @Query("status") status?: PurchaseOrderStatus,
-    @Query("limit") limit?: string,
+    @Query("limit") limit?: string
   ) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.service.findAll({
-      supplierId,
+      branchId,
+      supplierId: supplierId?.trim() ? supplierId.trim() : undefined,
       status,
       limit: limit ? Number(limit) : undefined,
     });
   }
 
   @Get(":id")
-  findOne(@Param("id") id: string) {
-    return this.service.findOne(id);
+  findOne(@Req() req: any, @Param("id") id: string) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.findOne(branchId, id);
   }
 
   @Patch(":id/status")
-  setStatus(@Param("id") id: string, @Body() dto: { status: PurchaseOrderStatus }) {
-    return this.service.setStatus(id, dto.status);
+  setStatus(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body() dto: { status: PurchaseOrderStatus }
+  ) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.setStatus(branchId, id, dto.status);
   }
 
   @Patch(":id/receive")
-  receive(@Req() req: any, @Param("id") id: string, @Body() dto: ReceivePurchaseOrderDto) {
+  receive(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body() dto: ReceivePurchaseOrderDto
+  ) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.service.receive(id, {
       ...dto,
+      branchId,
       userId: req?.user?.id ?? req?.user?._id ?? null,
     });
   }
 
   @Patch(":id/invoice")
-  attachInvoice(@Param("id") id: string, @Body() dto: AttachInvoiceDto) {
-    return this.service.attachInvoice(id, dto);
+  attachInvoice(
+    @Req() req: any,
+    @Param("id") id: string,
+    @Body() dto: AttachInvoiceDto
+  ) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.attachInvoice(branchId, id, dto);
   }
 }

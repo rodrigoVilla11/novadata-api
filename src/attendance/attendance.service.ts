@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+
 import {
   AttendanceRecord,
   AttendanceDocument,
@@ -45,7 +46,7 @@ export class AttendanceService {
   private toDTO(doc: any) {
     return {
       id: String(doc._id),
-      branchId: doc.branchId ? String(doc.branchId) : null, // ✅ NUEVO
+      branchId: doc.branchId ? String(doc.branchId) : null,
       dateKey: doc.dateKey,
       employeeId: String(doc.employeeId),
       checkInAt: doc.checkInAt,
@@ -63,23 +64,43 @@ export class AttendanceService {
   // Guards / validations
   // ---------------------------------------------------------------------------
 
-  private async assertEmployeeInBranch(employeeId: Types.ObjectId, branchId: Types.ObjectId) {
+  private async assertEmployeeInBranch(
+    employeeId: Types.ObjectId,
+    branchId: Types.ObjectId,
+  ) {
     const emp = await this.employeeModel
       .findOne({ _id: employeeId, branchId })
       .select({ _id: 1, branchId: 1 })
       .lean();
 
     if (!emp) {
-      // o NotFoundException si preferís ocultar que existe en otra branch
       throw new ForbiddenException('Empleado no pertenece a tu sucursal');
     }
+  }
+
+  private normOptionalText(v: any): string | null {
+    const s = v === undefined ? undefined : String(v ?? '').trim();
+    if (s === undefined) return null; // ojo: solo se usa cuando querés set explícito
+    return s ? s : null;
+  }
+
+  private normalizeOptionalInput(
+    v: string | null | undefined,
+  ): { provided: boolean; value: string | null } {
+    if (v === undefined) return { provided: false, value: null };
+    const s = String(v ?? '').trim();
+    return { provided: true, value: s ? s : null };
   }
 
   // ---------------------------------------------------------------------------
   // Queries
   // ---------------------------------------------------------------------------
 
-  async getOne(params: { branchId: string; dateKey: string; employeeId: string }) {
+  async getOne(params: {
+    branchId: string;
+    dateKey: string;
+    employeeId: string;
+  }) {
     const branchId = toObjectId(params.branchId, 'branchId');
     const dateKey = normalizeDateKey(params.dateKey);
     const employeeId = toObjectId(params.employeeId, 'employeeId');
@@ -97,7 +118,8 @@ export class AttendanceService {
 
     const filter: any = { branchId };
     if (params?.dateKey) filter.dateKey = normalizeDateKey(params.dateKey);
-    if (params?.employeeId) filter.employeeId = toObjectId(params.employeeId, 'employeeId');
+    if (params?.employeeId)
+      filter.employeeId = toObjectId(params.employeeId, 'employeeId');
 
     const docs = await this.attendanceModel
       .find(filter)
@@ -124,7 +146,7 @@ export class AttendanceService {
   // ---------------------------------------------------------------------------
 
   async checkIn(input: {
-    branchId: string; // ✅ obligatorio
+    branchId: string;
     dateKey: string;
     employeeId: string;
     photoUrl?: string | null;
@@ -136,31 +158,38 @@ export class AttendanceService {
     const dateKey = normalizeDateKey(input.dateKey);
     const employeeId = toObjectId(input.employeeId, 'employeeId');
 
-    // ✅ seguridad: el empleado tiene que ser de la branch
     await this.assertEmployeeInBranch(employeeId, branchId);
 
     const now = input.at ?? new Date();
 
-    // update pipeline:
-    // - upsert por branchId+dateKey+employeeId
-    // - checkInAt solo si null
-    // - setea branchId siempre
+    const photo = this.normalizeOptionalInput(input.photoUrl);
+    const notes = this.normalizeOptionalInput(input.notes);
+
+    const createdBy = input.createdByUserId
+      ? toObjectId(input.createdByUserId, 'createdByUserId')
+      : null;
+
+    // ✅ No pisar createdBy: solo al crear
+    // ✅ checkInAt solo si está null
     const pipeline: any[] = [
+      {
+        $setOnInsert: {
+          branchId,
+          dateKey,
+          employeeId,
+          createdBy,
+        },
+      },
       {
         $set: {
           branchId,
           dateKey,
           employeeId,
-          createdBy: input.createdByUserId ? toObjectId(input.createdByUserId, 'createdByUserId') : null,
+
           checkInAt: { $ifNull: ['$checkInAt', now] },
-          checkInPhotoUrl:
-            input.photoUrl !== undefined
-              ? input.photoUrl
-              : { $ifNull: ['$checkInPhotoUrl', null] },
-          notes:
-            input.notes !== undefined
-              ? input.notes
-              : { $ifNull: ['$notes', null] },
+
+          ...(photo.provided ? { checkInPhotoUrl: photo.value } : {}),
+          ...(notes.provided ? { notes: notes.value } : {}),
         },
       },
     ];
@@ -177,7 +206,7 @@ export class AttendanceService {
   }
 
   async checkOut(input: {
-    branchId: string; // ✅ obligatorio
+    branchId: string;
     dateKey: string;
     employeeId: string;
     photoUrl?: string | null;
@@ -190,36 +219,59 @@ export class AttendanceService {
     const employeeId = toObjectId(input.employeeId, 'employeeId');
     const now = input.at ?? new Date();
 
-    // ✅ seguridad: el empleado tiene que ser de la branch
     await this.assertEmployeeInBranch(employeeId, branchId);
 
-    const existing = await this.attendanceModel
-      .findOne({ branchId, dateKey, employeeId })
-      .lean();
-
-    if (!existing) {
-      throw new NotFoundException('No hay check-in para este empleado en esta fecha');
-    }
-    if (!existing.checkInAt) {
-      throw new BadRequestException('El registro no tiene check-in');
-    }
-    if (existing.checkOutAt) {
-      throw new BadRequestException('Ya existe check-out para este día');
-    }
-    if (now.getTime() < new Date(existing.checkInAt).getTime()) {
-      throw new BadRequestException('check-out no puede ser antes del check-in');
-    }
+    const photo = this.normalizeOptionalInput(input.photoUrl);
+    const notes = this.normalizeOptionalInput(input.notes);
 
     const patch: any = {
       checkOutAt: now,
-      checkOutPhotoUrl: input.photoUrl ?? null,
+      ...(photo.provided ? { checkOutPhotoUrl: photo.value } : {}),
+      ...(notes.provided ? { notes: notes.value } : {}),
     };
-    if (input.notes !== undefined) patch.notes = input.notes;
-    if (input.createdByUserId) patch.createdBy = toObjectId(input.createdByUserId, 'createdByUserId');
 
+    // ✅ atómico: solo si tiene checkInAt y NO tiene checkOutAt todavía
     const doc = await this.attendanceModel
-      .findOneAndUpdate({ branchId, dateKey, employeeId }, { $set: patch }, { new: true })
+      .findOneAndUpdate(
+        {
+          branchId,
+          dateKey,
+          employeeId,
+          checkInAt: { $ne: null },
+          checkOutAt: null,
+        },
+        { $set: patch },
+        { new: true },
+      )
       .lean();
+
+    if (!doc) {
+      const existing = await this.attendanceModel
+        .findOne({ branchId, dateKey, employeeId })
+        .select({ _id: 1, checkInAt: 1, checkOutAt: 1 })
+        .lean();
+
+      if (!existing) {
+        throw new NotFoundException(
+          'No hay check-in para este empleado en esta fecha',
+        );
+      }
+      if (!existing.checkInAt) {
+        throw new BadRequestException('El registro no tiene check-in');
+      }
+      if (existing.checkOutAt) {
+        throw new BadRequestException('Ya existe check-out para este día');
+      }
+      throw new BadRequestException('No se pudo hacer check-out');
+    }
+
+    // validación temporal (rara vez falla si now es "ahora", pero la dejo por seguridad)
+    if (
+      doc.checkInAt &&
+      now.getTime() < new Date(doc.checkInAt).getTime()
+    ) {
+      throw new BadRequestException('check-out no puede ser antes del check-in');
+    }
 
     return this.toDTO(doc);
   }
@@ -263,7 +315,7 @@ export class AttendanceService {
 
     const onlyActive = (q.onlyActive ?? 'true') === 'true';
 
-    const employeeMatch: any = { branchId }; // ✅ importantísimo
+    const employeeMatch: any = { branchId };
     if (q.employeeId) employeeMatch._id = toObjectId(q.employeeId, 'employeeId');
     if (onlyActive) employeeMatch.isActive = true;
 
@@ -281,7 +333,7 @@ export class AttendanceService {
               $match: {
                 $expr: {
                   $and: [
-                    { $eq: ['$branchId', '$$brId'] },          // ✅ filtra branch
+                    { $eq: ['$branchId', '$$brId'] },
                     { $eq: ['$employeeId', '$$empId'] },
                     { $gte: ['$dateKey', from] },
                     { $lte: ['$dateKey', to] },
@@ -299,7 +351,11 @@ export class AttendanceService {
             {
               $addFields: {
                 hours: {
-                  $cond: [{ $gt: ['$_ms', 0] }, { $divide: ['$_ms', 1000 * 60 * 60] }, 0],
+                  $cond: [
+                    { $gt: ['$_ms', 0] },
+                    { $divide: ['$_ms', 1000 * 60 * 60] },
+                    0,
+                  ],
                 },
               },
             },

@@ -8,6 +8,7 @@ import {
   Query,
   Req,
   UseGuards,
+  BadRequestException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from 'src/auth/roles.decorator';
@@ -16,25 +17,42 @@ import { SaleStatus } from './schemas/sale.schema';
 import { PaymentMethod } from 'src/cash/schemas/cash-movement.schema';
 import { SalesService } from './sales.service';
 
+function getBranchIdOrThrow(req: any) {
+  const branchId = req?.user?.branchId ?? null; // viene del JWT payload
+  if (!branchId || String(branchId).trim() === '') {
+    throw new BadRequestException('branchId is required (missing in req.user)');
+  }
+  return String(branchId);
+}
+
 @Controller('sales')
 @UseGuards(AuthGuard('jwt'))
 @Roles('ADMIN', 'MANAGER', 'CASHIER')
 export class SalesController {
   constructor(private readonly salesService: SalesService) {}
 
+  /**
+   * POST /sales/from-order/:orderId
+   */
   @Post('from-order/:orderId')
   createFromOrder(@Req() req: any, @Param('orderId') orderId: string) {
-    return this.salesService.createFromOrder(req.user, orderId);
+    const branchId = getBranchIdOrThrow(req);
+    return this.salesService.createFromOrder(req.user, branchId, orderId);
   }
 
+  /**
+   * GET /sales?status=&from=&to=&limit=
+   */
   @Get()
   findAll(
+    @Req() req: any,
     @Query('status') status?: SaleStatus,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.salesService.findAll({
+    const branchId = getBranchIdOrThrow(req);
+    return this.salesService.findAll(branchId, {
       status,
       from,
       to,
@@ -42,11 +60,18 @@ export class SalesController {
     });
   }
 
+  /**
+   * GET /sales/:id
+   */
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.salesService.findOne(id);
+  findOne(@Req() req: any, @Param('id') id: string) {
+    const branchId = getBranchIdOrThrow(req);
+    return this.salesService.findOne(branchId, id);
   }
 
+  /**
+   * POST /sales/:id/pay
+   */
   @Post(':id/pay')
   pay(
     @Req() req: any,
@@ -64,21 +89,27 @@ export class SalesController {
       categoryId?: string | null;
     },
   ) {
-    return this.salesService.pay(req.user, id, body);
+    const branchId = getBranchIdOrThrow(req);
+    return this.salesService.pay(req.user, branchId, id, body);
   }
 
+  /**
+   * PATCH /sales/:id/void
+   * body: { reason?, dateKey? }  (dateKey opcional override)
+   */
   @Patch(':id/void')
-  @Roles('ADMIN', 'MANAGER', 'CASHIER')
   voidSale(
     @Req() req: any,
     @Param('id') id: string,
     @Body() body: { reason?: string | null; dateKey?: string | null },
   ) {
+    const branchId = getBranchIdOrThrow(req);
     return this.salesService.voidSale(
       req.user,
+      branchId,
       id,
-      body.reason ?? null,
-      body.dateKey ?? null,
+      body?.reason ?? null,
+      body?.dateKey ?? null,
     );
   }
 }

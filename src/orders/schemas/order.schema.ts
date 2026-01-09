@@ -14,9 +14,9 @@ export enum OrderStatus {
 export type OrderSource = 'POS' | 'ONLINE';
 
 export enum OrderFulfillment {
-  DINE_IN = 'DINE_IN',     // salón
-  TAKEAWAY = 'TAKEAWAY',   // retiro
-  DELIVERY = 'DELIVERY',   // envío
+  DINE_IN = 'DINE_IN',
+  TAKEAWAY = 'TAKEAWAY',
+  DELIVERY = 'DELIVERY',
 }
 
 @Schema({ _id: false })
@@ -57,21 +57,27 @@ export class OrderCustomerSnapshot {
 
 @Schema({ timestamps: true })
 export class Order {
+  // ✅ Branch (multi-sucursal)
+  @Prop({ type: Types.ObjectId, ref: 'Branch', required: true, index: true })
+  branchId: Types.ObjectId;
+
   @Prop({ type: String, enum: OrderStatus, required: true, index: true })
   status: OrderStatus;
 
   @Prop({ type: String, required: true, index: true })
   source: OrderSource;
 
-  // NUEVO
-  @Prop({ type: String, enum: OrderFulfillment, default: OrderFulfillment.TAKEAWAY, index: true })
+  @Prop({
+    type: String,
+    enum: OrderFulfillment,
+    default: OrderFulfillment.TAKEAWAY,
+    index: true,
+  })
   fulfillment: OrderFulfillment;
 
-  // Si tenés Customer real (online / clientes frecuentes)
   @Prop({ type: Types.ObjectId, ref: 'Customer', default: null, index: true })
   customerId?: Types.ObjectId | null;
 
-  // Snapshot para POS rápido / delivery sin crear customer
   @Prop({ type: OrderCustomerSnapshot, default: null })
   customerSnapshot?: OrderCustomerSnapshot | null;
 
@@ -102,6 +108,8 @@ export class Order {
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
 
-OrderSchema.index({ status: 1, createdAt: -1 });
-OrderSchema.index({ source: 1, createdAt: -1 });
-OrderSchema.index({ fulfillment: 1, createdAt: -1 });
+// Índices típicos para listados
+OrderSchema.index({ branchId: 1, createdAt: -1 });
+OrderSchema.index({ branchId: 1, status: 1, createdAt: -1 });
+OrderSchema.index({ branchId: 1, source: 1, createdAt: -1 });
+OrderSchema.index({ branchId: 1, fulfillment: 1, createdAt: -1 });

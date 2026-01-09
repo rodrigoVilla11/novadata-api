@@ -37,6 +37,7 @@ type ApplyMovementItem = {
 };
 
 type ApplySaleInput = {
+  branchId: string; // ✅ NUEVO (viene del JWT en controller)
   dateKey: string; // YYYY-MM-DD
   saleId: string; // ObjectId string
   lines: Array<{ productId: string; qty: number }>;
@@ -45,6 +46,7 @@ type ApplySaleInput = {
 };
 
 type ApplyManualInput = {
+  branchId: string; // ✅ NUEVO
   dateKey: string;
   type: StockMovementType; // IN | OUT | ADJUST
   reason: StockMovementReason; // PURCHASE | MANUAL | WASTE | etc.
@@ -56,6 +58,7 @@ type ApplyManualInput = {
 };
 
 type ApplySaleReversalInput = {
+  branchId: string; // ✅ NUEVO
   dateKey: string;
   saleId: string; // ObjectId string
   lines: Array<{ productId: string; qty: number }>;
@@ -101,15 +104,24 @@ export class StockService {
       .join(':');
   }
 
+  private assertBranchId(branchId: string) {
+    const s = String(branchId ?? '').trim();
+    if (!s) throw new BadRequestException('branchId is required');
+    if (!Types.ObjectId.isValid(s))
+      throw new BadRequestException('branchId must be a valid ObjectId');
+    return new Types.ObjectId(s);
+  }
+
   /**
    * Core: aplica UN movimiento por ingrediente (1 item) en transacción:
-   * - update Ingredient.stock (contabiliza)
+   * - update Ingredient.stock
    * - insert StockMovement con qtyAfter
    *
    * Si dedupeKey ya existe => aborta y NO toca stock (rollback).
    */
   private async applyOneMovementTx(args: {
     session: any;
+    branchId: Types.ObjectId; // ✅ NUEVO
     dateKey: string;
     ingredientId: Types.ObjectId;
     unit: Unit;
@@ -125,14 +137,17 @@ export class StockService {
   }) {
     const forbidNegative = args.forbidNegative ?? true;
 
-    // 1) update stock actual
+    // 1) update stock actual (✅ por branch)
     const inc: any = { 'stock.onHand': args.qtyDelta };
-
     if (args.qtyDelta > 0) inc['stock.totalIn'] = args.qtyDelta;
     if (args.qtyDelta < 0) inc['stock.totalOut'] = Math.abs(args.qtyDelta);
 
     const updated = await this.ingredientModel.findOneAndUpdate(
-      { _id: args.ingredientId },
+      {
+        _id: args.ingredientId,
+        // ✅ IMPORTANTE: Ingredient debe tener branchId
+        branchId: args.branchId,
+      } as any,
       {
         $inc: inc,
         $set: { 'stock.lastMovementAt': new Date() },
@@ -146,7 +161,9 @@ export class StockService {
 
     if (!updated)
       throw new NotFoundException(
-        `Ingredient not found: ${String(args.ingredientId)}`,
+        `Ingredient not found in branch: ingredient=${String(
+          args.ingredientId,
+        )}`,
       );
 
     const onHandAfter = num((updated as any).stock?.onHand);
@@ -155,7 +172,7 @@ export class StockService {
       (updated as any).stock?.trackStock &&
       onHandAfter < 0
     ) {
-      const onHandBefore = onHandAfter - num(args.qtyDelta); // qtyDelta es signed
+      const onHandBefore = onHandAfter - num(args.qtyDelta);
       throw new BadRequestException(
         `Stock negativo no permitido: ingredient=${String(args.ingredientId)} ` +
           `before=${onHandBefore} delta=${args.qtyDelta} after=${onHandAfter} ` +
@@ -163,11 +180,12 @@ export class StockService {
       );
     }
 
-    // 2) insert movement (idempotente por dedupeKey unique)
+    // 2) insert movement (✅ con branchId)
     try {
       await this.movementModel.create(
         [
           {
+            branchId: args.branchId, // ✅
             dateKey: args.dateKey,
             ingredientId: args.ingredientId,
             unit: args.unit,
@@ -185,7 +203,6 @@ export class StockService {
         { session: args.session },
       );
     } catch (e: any) {
-      // clave duplicada => idempotencia (rollback automático por transacción)
       if (e?.code === 11000) {
         throw new BadRequestException('Duplicate movement (already applied)');
       }
@@ -202,6 +219,7 @@ export class StockService {
   async applySale(dto: ApplySaleInput) {
     assertDateKey(dto.dateKey);
 
+    const branchObjId = this.assertBranchId(dto.branchId);
     const saleObjId = this.oidOrThrow(dto.saleId, 'saleId');
     const userObjId = this.oidOrNull(dto.userId, 'userId');
 
@@ -209,11 +227,8 @@ export class StockService {
       throw new BadRequestException('lines[] is required');
     }
 
-    // 1) Expandir productos -> ingredientes y acumular
-    const acc = new Map<
-      string,
-      { ingredientId: string; unit: Unit; qty: number }
-    >();
+    // Expandir productos -> ingredientes y acumular
+    const acc = new Map<string, { ingredientId: string; unit: Unit; qty: number }>();
 
     for (const line of dto.lines) {
       const productId = String(line.productId || '').trim();
@@ -234,11 +249,7 @@ export class StockService {
         const key = `${it.ingredientId}::${it.unit}`;
         const prev = acc.get(key);
         if (!prev) {
-          acc.set(key, {
-            ingredientId: it.ingredientId,
-            unit: it.unit,
-            qty: it.qty,
-          });
+          acc.set(key, { ingredientId: it.ingredientId, unit: it.unit, qty: it.qty });
         } else {
           prev.qty += it.qty;
         }
@@ -250,20 +261,13 @@ export class StockService {
       .filter((x) => x.qty > 0);
 
     if (!items.length) {
-      throw new BadRequestException(
-        'No ingredient consumption computed from sale',
-      );
+      throw new BadRequestException('No ingredient consumption computed from sale');
     }
 
-    // 2) Tx: por cada item, descontar stock y grabar movimiento
     const session = await this.conn.startSession();
     try {
       const result = await session.withTransaction(async () => {
-        const outItems: Array<{
-          ingredientId: string;
-          unit: Unit;
-          qty: number;
-        }> = [];
+        const outItems: Array<{ ingredientId: string; unit: Unit; qty: number }> = [];
         let created = 0;
 
         for (const it of items) {
@@ -281,6 +285,7 @@ export class StockService {
           try {
             await this.applyOneMovementTx({
               session,
+              branchId: branchObjId, // ✅
               dateKey: dto.dateKey,
               ingredientId: ingObjId,
               unit: it.unit,
@@ -288,18 +293,17 @@ export class StockService {
               type: StockMovementType.OUT,
               reason: StockMovementReason.SALE,
               refType: 'SALE',
-              refId: saleObjId, // ✅ string
+              refId: saleObjId,
               note: dto.note ?? null,
-              createdByUserId: userObjId, // ✅ según tu schema
+              createdByUserId: userObjId,
               dedupeKey,
             });
 
             created += 1;
           } catch (e: any) {
-            // ✅ idempotencia: si ya existía el movimiento, lo tratamos como OK
             const msg = String(e?.message ?? '');
             const code = e?.code;
-            const isDup = code === 11000 || msg.includes('E11000');
+            const isDup = code === 11000 || msg.includes('E11000') || msg.includes('Duplicate movement');
             if (!isDup) throw e;
           }
 
@@ -317,7 +321,7 @@ export class StockService {
         ok: true,
         created: result?.created ?? 0,
         items: result?.outItems ?? [],
-        idempotent: (result?.created ?? 0) === 0, // opcional, útil para debug
+        idempotent: (result?.created ?? 0) === 0,
       };
     } finally {
       session.endSession();
@@ -325,14 +329,12 @@ export class StockService {
   }
 
   /**
-   * Manual (compras/merma/ajuste/etc.) => contabiliza
-   *
-   * Idempotencia:
-   * - si viene refType + refId => dedupeKey por item
-   * - si no viene refId => no dedupe (manual libre)
+   * Manual (compras/merma/ajuste/etc.)
    */
   async applyManual(input: ApplyManualInput) {
     assertDateKey(input.dateKey);
+
+    const branchObjId = this.assertBranchId(input.branchId);
 
     if (!input.type) throw new BadRequestException('type is required');
     if (!input.reason) throw new BadRequestException('reason is required');
@@ -344,12 +346,16 @@ export class StockService {
     const refObjId = this.oidOrNull(input.refId, 'refId');
     const userObjId = this.oidOrNull(input.userId, 'userId');
 
-    // Resolver baseUnit si falta unit
+    // Resolver baseUnit si falta unit (✅ por branch)
     const ids = input.items
       .map((x) => String(x.ingredientId || '').trim())
       .filter(Boolean);
+
     const ingredientDocs = await this.ingredientModel
-      .find({ _id: { $in: ids.map((id) => new Types.ObjectId(id)) } })
+      .find({
+        _id: { $in: ids.map((id) => new Types.ObjectId(id)) },
+        branchId: branchObjId,
+      } as any)
       .select({ baseUnit: 1 })
       .lean();
 
@@ -369,7 +375,7 @@ export class StockService {
           const ing = ingById.get(ingredientIdStr);
           if (!ing)
             throw new NotFoundException(
-              `Ingredient not found: ${ingredientIdStr}`,
+              `Ingredient not found in branch: ${ingredientIdStr}`,
             );
 
           const ingObjId = new Types.ObjectId(ingredientIdStr);
@@ -405,6 +411,7 @@ export class StockService {
 
           await this.applyOneMovementTx({
             session,
+            branchId: branchObjId, // ✅
             dateKey: input.dateKey,
             ingredientId: ingObjId,
             unit,
@@ -431,12 +438,12 @@ export class StockService {
   }
 
   /**
-   * Reversa de venta: devuelve ingredientes consumidos (REVERSAL qty +)
-   * Idempotencia: dedupeKey = SALE:<saleId>:<ingredientId>:<unit>:REVERSAL
+   * Reversa de venta: REVERSAL qty +
    */
   async applySaleReversal(dto: ApplySaleReversalInput) {
     assertDateKey(dto.dateKey);
 
+    const branchObjId = this.assertBranchId(dto.branchId);
     const saleObjId = this.oidOrThrow(dto.saleId, 'saleId');
     const userObjId = this.oidOrNull(dto.userId, 'userId');
 
@@ -444,11 +451,7 @@ export class StockService {
       throw new BadRequestException('lines[] is required');
     }
 
-    // 1) Expandir productos -> ingredientes y acumular
-    const acc = new Map<
-      string,
-      { ingredientId: string; unit: Unit; qty: number }
-    >();
+    const acc = new Map<string, { ingredientId: string; unit: Unit; qty: number }>();
 
     for (const line of dto.lines) {
       const productId = String(line.productId || '').trim();
@@ -467,12 +470,7 @@ export class StockService {
       for (const it of expanded.items) {
         const key = `${it.ingredientId}::${it.unit}`;
         const prev = acc.get(key);
-        if (!prev)
-          acc.set(key, {
-            ingredientId: it.ingredientId,
-            unit: it.unit,
-            qty: it.qty,
-          });
+        if (!prev) acc.set(key, { ingredientId: it.ingredientId, unit: it.unit, qty: it.qty });
         else prev.qty += it.qty;
       }
     }
@@ -504,6 +502,7 @@ export class StockService {
 
           await this.applyOneMovementTx({
             session,
+            branchId: branchObjId, // ✅
             dateKey: dto.dateKey,
             ingredientId: ingObjId,
             unit: it.unit,
@@ -515,7 +514,6 @@ export class StockService {
             note: dto.note ?? null,
             createdByUserId: userObjId,
             dedupeKey,
-            // reversa no debería “romper” por stock negativo, así que dejamos forbidNegative true igual.
           });
 
           count += 1;
@@ -533,10 +531,11 @@ export class StockService {
   /**
    * Balance actual (rápido): usa Ingredient.stock.onHand
    */
-  async getBalances(params?: { ingredientId?: string | null }) {
-    const filter: any = {};
-    if (params?.ingredientId)
-      filter._id = new Types.ObjectId(params.ingredientId);
+  async getBalances(params: { branchId: string; ingredientId?: string | null }) {
+    const branchObjId = this.assertBranchId(params.branchId);
+
+    const filter: any = { branchId: branchObjId };
+    if (params?.ingredientId) filter._id = new Types.ObjectId(params.ingredientId);
 
     const rows = await this.ingredientModel
       .find(filter)
@@ -558,21 +557,23 @@ export class StockService {
   /**
    * Movimientos (auditoría)
    */
-  async listMovements(params?: {
+  async listMovements(params: {
+    branchId: string;
     dateKey?: string;
     ingredientId?: string | null;
     refType?: string | null;
-    refId?: string | null; // ObjectId string
+    refId?: string | null;
     limit?: number;
   }) {
-    const filter: any = {};
+    const branchObjId = this.assertBranchId(params.branchId);
+
+    const filter: any = { branchId: branchObjId };
 
     if (params?.dateKey) {
       assertDateKey(params.dateKey);
       filter.dateKey = params.dateKey;
     }
-    if (params?.ingredientId)
-      filter.ingredientId = new Types.ObjectId(params.ingredientId);
+    if (params?.ingredientId) filter.ingredientId = new Types.ObjectId(params.ingredientId);
     if (params?.refType) filter.refType = String(params.refType);
     if (params?.refId) filter.refId = new Types.ObjectId(params.refId);
 
@@ -593,17 +594,14 @@ export class StockService {
 
       return {
         id: String(m._id),
+        branchId: m.branchId ? String(m.branchId) : null,
         dateKey: m.dateKey,
         type: m.type,
         reason: m.reason,
         refType: m.refType ?? null,
         refId: m.refId ? String(m.refId) : null,
 
-        ingredientId: ing
-          ? String(ing._id)
-          : m.ingredientId
-            ? String(m.ingredientId)
-            : null,
+        ingredientId: ing ? String(ing._id) : m.ingredientId ? String(m.ingredientId) : null,
         ingredientName: ing ? String(ing.displayName ?? ing.name ?? '') : null,
         unit: m.unit,
 
@@ -617,9 +615,12 @@ export class StockService {
     });
   }
 
-  // stock.service.ts
+  /**
+   * Recibir compra (helper)
+   */
   async applyPurchaseReceiveTx(input: {
     session: any;
+    branchId: Types.ObjectId; // ✅ NUEVO
     dateKey: string;
     purchaseOrderId: Types.ObjectId;
     ingredientId: Types.ObjectId;
@@ -638,6 +639,7 @@ export class StockService {
 
     await this.applyOneMovementTx({
       session: input.session,
+      branchId: input.branchId, // ✅
       dateKey: input.dateKey,
       ingredientId: input.ingredientId,
       unit: input.unit,

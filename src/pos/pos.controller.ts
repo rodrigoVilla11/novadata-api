@@ -28,41 +28,53 @@ export class PosController {
   constructor(private readonly posService: PosService) {}
 
   @Post('cart')
-  createCart(@Body() dto: CreatePosCartDto) {
-    return this.posService.createCart(dto as any);
+  createCart(@Req() req: any, @Body() dto: CreatePosCartDto) {
+    return this.posService.createCart(req.user, dto as any);
   }
 
   @Get('cart')
-  listCarts(@Query('status') status?: any, @Query('limit') limit?: string) {
-    return this.posService.listCarts({
+  listCarts(
+    @Req() req: any,
+    @Query('status') status?: any,
+    @Query('limit') limit?: string,
+  ) {
+    return this.posService.listCarts(req.user, {
       status,
       limit: limit ? Number(limit) : undefined,
     });
   }
 
   @Get('cart/:id')
-  getCart(@Param('id') id: string) {
-    return this.posService.getCart(id);
+  getCart(@Req() req: any, @Param('id') id: string) {
+    return this.posService.getCart(req.user, id);
   }
 
   @Put('cart/:id/items')
-  setCartItems(@Param('id') id: string, @Body() dto: UpdatePosCartItemsDto) {
-    return this.posService.setCartItems(id, dto.items as any);
+  setCartItems(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() dto: UpdatePosCartItemsDto,
+  ) {
+    return this.posService.setCartItems(req.user, id, dto.items as any);
   }
 
   @Put('cart/:id/note')
-  setCartNote(@Param('id') id: string, @Body() dto: UpdatePosCartNoteDto) {
-    return this.posService.setCartNote(id, dto.note ?? null);
+  setCartNote(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() dto: UpdatePosCartNoteDto,
+  ) {
+    return this.posService.setCartNote(req.user, id, dto.note ?? null);
   }
 
   @Post('cart/:id/cancel')
-  cancelCart(@Param('id') id: string) {
-    return this.posService.cancelCart(id);
+  cancelCart(@Req() req: any, @Param('id') id: string) {
+    return this.posService.cancelCart(req.user, id);
   }
 
   @Get('cart/:id/sale')
-  getSaleForCart(@Param('id') id: string) {
-    return this.posService.getSaleForCart(id);
+  getSaleForCart(@Req() req: any, @Param('id') id: string) {
+    return this.posService.getSaleForCart(req.user, id);
   }
 
   @Post('cart/:id/checkout')
@@ -73,6 +85,7 @@ export class PosController {
   ) {
     return this.posService.checkoutCart(req.user, id, dto as any);
   }
+
   @Post('checkout')
   checkout(@Req() req: any, @Body() dto: PosCheckoutDto) {
     return this.posService.checkout(req.user, dto);

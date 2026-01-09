@@ -12,12 +12,15 @@ import {
   ForbiddenException,
   UseGuards,
 } from '@nestjs/common';
+
 import { AttendanceService } from './attendance.service';
 import { Roles } from '../auth/roles.decorator';
+
 import { CheckInDto } from './dto/check-in.dto';
 import { CheckOutDto } from './dto/check-out.dto';
 import { UpdateAttendanceDto } from './dto/update-attendance.dto';
 import { AttendanceSummaryQueryDto } from './dto/attendance-summary.dto';
+
 import { JwtAuthGuard } from 'src/auth/jwt-auth.guard';
 import { RolesGuard } from 'src/auth/roles.guard';
 
@@ -28,14 +31,33 @@ export class AttendanceController {
   constructor(private readonly attendanceService: AttendanceService) {}
 
   private getBranchIdOrThrow(req: any) {
-    const branchId = req?.user?.branchId;
+    const branchId =
+      req?.user?.branchId ??
+      req?.user?.branch_id ??
+      req?.user?.branch?.id ??
+      req?.user?.branch?._id ??
+      null;
 
     if (!branchId) throw new ForbiddenException('Usuario sin branch asignada');
     return String(branchId);
   }
 
-  private getUserId(req: any) {
-    return req?.user?.id || req?.user?.userId || req?.user?._id || null;
+  private getUserId(req: any): string | null {
+    const uid = req?.user?.id ?? req?.user?.userId ?? req?.user?._id ?? null;
+    return uid ? String(uid) : null;
+  }
+
+  // (Opcional) GET /attendance/one?dateKey=YYYY-MM-DD&employeeId=...
+  // si no lo usás, podés borrarlo
+  @Get('one')
+  @Roles('ADMIN', 'MANAGER')
+  getOne(
+    @Query('dateKey') dateKey: string,
+    @Query('employeeId') employeeId: string,
+    @Req() req: any,
+  ) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.attendanceService.getOne({ branchId, dateKey, employeeId });
   }
 
   // GET /attendance?dateKey=YYYY-MM-DD&employeeId=...
@@ -60,7 +82,7 @@ export class AttendanceController {
 
   // PUT /attendance/checkin
   @Put('checkin')
-  @Roles('ADMIN', 'MANAGER')
+  @Roles('ADMIN', 'MANAGER') // si querés: agregar 'CASHIER'
   checkIn(@Body() dto: CheckInDto, @Req() req: any) {
     const branchId = this.getBranchIdOrThrow(req);
     const createdByUserId = this.getUserId(req);
@@ -77,7 +99,7 @@ export class AttendanceController {
 
   // PUT /attendance/checkout
   @Put('checkout')
-  @Roles('ADMIN', 'MANAGER')
+  @Roles('ADMIN', 'MANAGER') // si querés: agregar 'CASHIER'
   checkOut(@Body() dto: CheckOutDto, @Req() req: any) {
     const branchId = this.getBranchIdOrThrow(req);
     const createdByUserId = this.getUserId(req);

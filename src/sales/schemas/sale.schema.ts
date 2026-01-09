@@ -5,9 +5,9 @@ import { PaymentMethod } from 'src/cash/schemas/cash-movement.schema';
 export type SaleDocument = HydratedDocument<Sale>;
 
 export enum SaleStatus {
-  DRAFT = 'DRAFT', // creado pero no cobrado
-  PAID = 'PAID', // cobrado
-  VOIDED = 'VOIDED', // anulado (reverso contable se puede hacer luego)
+  DRAFT = 'DRAFT',
+  PAID = 'PAID',
+  VOIDED = 'VOIDED',
 }
 
 export type SaleSource = 'POS' | 'ONLINE';
@@ -20,7 +20,6 @@ export class SaleItem {
   @Prop({ type: Number, required: true, min: 0 })
   qty: number;
 
-  // snapshot al momento de la venta
   @Prop({ type: Number, required: true, min: 0 })
   unitPrice: number;
 
@@ -45,6 +44,10 @@ export class SalePayment {
 
 @Schema({ timestamps: true })
 export class Sale {
+  // ✅ NUEVO: multi-branch
+  @Prop({ type: Types.ObjectId, ref: 'Branch', required: true, index: true })
+  branchId: Types.ObjectId;
+
   @Prop({ type: String, enum: SaleStatus, required: true, index: true })
   status: SaleStatus;
 
@@ -78,7 +81,6 @@ export class Sale {
   @Prop({ type: String, trim: true, default: null })
   note?: string | null;
 
-  // void
   @Prop({ type: Boolean, default: false })
   voided: boolean;
 
@@ -93,15 +95,22 @@ export class Sale {
 
   @Prop({ type: String, default: null })
   paidByUserId?: string | null;
-  
+
   @Prop({ type: String, default: null, index: true })
-  paidDateKey?: string | null; // YYYY-MM-DD (caja imputada)
+  paidDateKey?: string | null; // YYYY-MM-DD
 }
 
 export const SaleSchema = SchemaFactory.createForClass(Sale);
 
-SaleSchema.index({ status: 1, createdAt: -1 });
+// ✅ índices: siempre con branchId
+SaleSchema.index({ branchId: 1, status: 1, createdAt: -1 });
+SaleSchema.index({ branchId: 1, paidDateKey: 1, createdAt: -1 });
+
+// ✅ unique por orderId PERO por branch (para multi-tenant real)
 SaleSchema.index(
-  { orderId: 1 },
-  { unique: true, partialFilterExpression: { orderId: { $type: 'objectId' } } },
+  { branchId: 1, orderId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { orderId: { $type: 'objectId' } },
+  },
 );

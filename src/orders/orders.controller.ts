@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -6,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
@@ -13,6 +15,17 @@ import { Roles } from 'src/auth/roles.decorator';
 
 import { OrdersService } from './orders.service';
 import { OrderFulfillment, OrderStatus } from './schemas/order.schema';
+
+function pickBranchId(req: any) {
+  const b =
+    req?.user?.branchId ??
+    req?.user?.branch_id ??
+    req?.user?.branch?.id ??
+    null;
+
+  const s = String(b ?? '').trim();
+  return s ? s : null;
+}
 
 @Controller('orders')
 @UseGuards(AuthGuard('jwt'))
@@ -22,6 +35,7 @@ export class OrdersController {
   @Post()
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
   create(
+    @Req() req: any,
     @Body()
     body: {
       source: 'POS' | 'ONLINE';
@@ -38,12 +52,19 @@ export class OrdersController {
       items?: Array<{ productId: string; qty: number; note?: string | null }>;
     },
   ) {
-    return this.ordersService.create(body);
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.create({
+      branchId,
+      ...body,
+    });
   }
 
   @Get()
   @Roles('ADMIN', 'MANAGER', 'CASHIER')
   findAll(
+    @Req() req: any,
     @Query('status') status?: OrderStatus,
     @Query('source') source?: 'POS' | 'ONLINE',
     @Query('fulfillment') fulfillment?: OrderFulfillment,
@@ -51,7 +72,11 @@ export class OrdersController {
     @Query('q') q?: string,
     @Query('limit') limit?: string,
   ) {
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
     return this.ordersService.findAll({
+      branchId,
       status,
       source,
       fulfillment,
@@ -63,40 +88,62 @@ export class OrdersController {
 
   @Get(':id')
   @Roles('ADMIN', 'MANAGER', 'CASHIER')
-  findOne(@Param('id') id: string) {
-    return this.ordersService.findOne(id);
+  findOne(@Req() req: any, @Param('id') id: string) {
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.findOne(branchId, id);
   }
 
   @Patch(':id/items')
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
   setItems(
+    @Req() req: any,
     @Param('id') id: string,
     @Body()
-    body: { items: Array<{ productId: string; qty: number; note?: string | null }> },
+    body: {
+      items: Array<{ productId: string; qty: number; note?: string | null }>;
+    },
   ) {
-    return this.ordersService.setItems(id, body.items ?? []);
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.setItems(branchId, id, body.items ?? []);
   }
 
   @Patch(':id/note')
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
-  setNote(@Param('id') id: string, @Body() body: { note?: string | null }) {
-    return this.ordersService.setNote(id, body.note ?? null);
+  setNote(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: { note?: string | null },
+  ) {
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.setNote(branchId, id, body.note ?? null);
   }
 
-  // NUEVO
   @Patch(':id/fulfillment')
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
   setFulfillment(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { fulfillment: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY' },
+    @Body()
+    body: {
+      fulfillment: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY';
+    },
   ) {
-    return this.ordersService.setFulfillment(id, body.fulfillment);
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.setFulfillment(branchId, id, body.fulfillment);
   }
 
-  // NUEVO
   @Patch(':id/customer-snapshot')
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
   setCustomerSnapshot(
+    @Req() req: any,
     @Param('id') id: string,
     @Body()
     body: {
@@ -111,24 +158,44 @@ export class OrdersController {
         | null;
     },
   ) {
-    return this.ordersService.setCustomerSnapshot(id, body.customerSnapshot ?? null);
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.setCustomerSnapshot(
+      branchId,
+      id,
+      body.customerSnapshot ?? null,
+    );
   }
 
   @Post(':id/accept')
   @Roles('ADMIN', 'MANAGER', 'CASHIER')
-  accept(@Param('id') id: string) {
-    return this.ordersService.accept(id);
+  accept(@Req() req: any, @Param('id') id: string) {
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.accept(branchId, id);
   }
 
   @Post(':id/reject')
   @Roles('ADMIN', 'MANAGER', 'CASHIER')
-  reject(@Param('id') id: string, @Body() body: { reason?: string | null }) {
-    return this.ordersService.reject(id, body.reason ?? null);
+  reject(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: { reason?: string | null },
+  ) {
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.reject(branchId, id, body.reason ?? null);
   }
 
   @Post(':id/cancel')
   @Roles('ADMIN', 'MANAGER', 'CASHIER', 'CUSTOMER')
-  cancel(@Param('id') id: string) {
-    return this.ordersService.cancel(id);
+  cancel(@Req() req: any, @Param('id') id: string) {
+    const branchId = pickBranchId(req);
+    if (!branchId) throw new BadRequestException('branchId missing in token');
+
+    return this.ordersService.cancel(branchId, id);
   }
 }

@@ -7,7 +7,11 @@ import {
 import { InjectModel } from "@nestjs/mongoose";
 import { Model, Types } from "mongoose";
 
-import { CashDay, CashDayDocument, CashDayStatus } from "./schemas/cash-day.schema";
+import {
+  CashDay,
+  CashDayDocument,
+  CashDayStatus,
+} from "./schemas/cash-day.schema";
 import {
   CashMovement,
   CashMovementDocument,
@@ -27,7 +31,10 @@ import {
   FinanceMovementDirection as FinDir,
 } from "../finance/movements/schemas/finance-movement.schema";
 
-import { FinanceDayClosing, FinanceDayClosingDocument } from "../finance/closings/schemas/finance-day-closing.schema";
+import {
+  FinanceDayClosing,
+  FinanceDayClosingDocument,
+} from "../finance/closings/schemas/finance-day-closing.schema";
 import { FinanceAccountsService } from "../finance/accounts/finance-accounts.service";
 
 function pickUserId(u: any) {
@@ -47,7 +54,8 @@ function assertDateKey(dateKey: string) {
   }
 }
 function oid(id: string, field: string) {
-  if (!Types.ObjectId.isValid(id)) throw new BadRequestException(`${field} inválido`);
+  if (!Types.ObjectId.isValid(id))
+    throw new BadRequestException(`${field} inválido`);
   return new Types.ObjectId(id);
 }
 
@@ -66,7 +74,7 @@ export class CashService {
     @InjectModel(FinanceDayClosing.name)
     private readonly finClosingModel: Model<FinanceDayClosingDocument>,
 
-    private readonly accountsService: FinanceAccountsService,
+    private readonly accountsService: FinanceAccountsService
   ) {}
 
   // ============================
@@ -120,11 +128,7 @@ export class CashService {
 
   /**
    * Elegimos a qué FinanceAccount impacta cada método.
-   * Lo correcto es que lo configures en DB, pero para arrancar:
-   * - CASH => cuenta tipo CASH llamada "Efectivo" (o "Caja")
-   * - TRANSFER => BANK/WALLET "Mercado Pago"/"Banco"
-   *
-   * ✅ Mejora clave: centralizarlo acá.
+   * Ideal: configurarlo en DB.
    */
   private async resolveFinanceAccountIdForMethod(method: PaymentMethod) {
     const accounts = await this.accountsService.findAll({
@@ -133,9 +137,11 @@ export class CashService {
     } as any);
 
     const byName = (name: string) =>
-      accounts.find((a: any) => String(a.name || "").toLowerCase() === name.toLowerCase());
+      accounts.find(
+        (a: any) =>
+          String(a.name || "").toLowerCase() === name.toLowerCase()
+      );
 
-    // Ajustá estos nombres a los tuyos:
     if (method === PaymentMethod.CASH) {
       return (byName("Efectivo") ?? byName("Caja") ?? accounts[0])?.id;
     }
@@ -157,7 +163,7 @@ export class CashService {
     if (!closing) return;
     if (closing.status === "LOCKED" && !hasRole(user, "ADMIN")) {
       throw new BadRequestException(
-        `El día ${dateKey} está LOCKED en FINANCE. Solo ADMIN puede modificar caja.`,
+        `El día ${dateKey} está LOCKED en FINANCE. Solo ADMIN puede modificar caja.`
       );
     }
   }
@@ -170,7 +176,9 @@ export class CashService {
     assertDateKey(dateKey);
     const bId = branchId ? oid(branchId, "branchId") : null;
 
-    const day = await this.cashDayModel.findOne({ dateKey, branchId: bId }).lean();
+    const day = await this.cashDayModel
+      .findOne({ dateKey, branchId: bId })
+      .lean();
     if (!day) return null;
 
     const rec = await this.recalcExpectedCash(String(day._id));
@@ -198,7 +206,7 @@ export class CashService {
             openedByUserId: pickUserId(user),
           },
         },
-        { upsert: true, new: true },
+        { upsert: true, new: true }
       )
       .lean();
 
@@ -212,7 +220,10 @@ export class CashService {
 
     const bId = dto.branchId ? oid(dto.branchId, "branchId") : null;
 
-    const existing = await this.cashDayModel.findOne({ dateKey: dto.dateKey, branchId: bId });
+    const existing = await this.cashDayModel.findOne({
+      dateKey: dto.dateKey,
+      branchId: bId,
+    });
 
     const openingCash = Math.max(0, toMoney(dto.openingCash));
 
@@ -229,7 +240,7 @@ export class CashService {
             openedAt: existing.openedAt ?? new Date(),
             openedByUserId: existing.openedByUserId ?? pickUserId(user),
           },
-          { new: true },
+          { new: true }
         )
         .lean();
 
@@ -261,7 +272,10 @@ export class CashService {
     await this.assertFinanceDayNotLocked(dto.dateKey, user);
 
     const bId = dto.branchId ? oid(dto.branchId, "branchId") : null;
-    const day = await this.cashDayModel.findOne({ dateKey: dto.dateKey, branchId: bId });
+    const day = await this.cashDayModel.findOne({
+      dateKey: dto.dateKey,
+      branchId: bId,
+    });
     if (!day) throw new NotFoundException("Caja del día no encontrada.");
 
     if (day.status === CashDayStatus.CLOSED) {
@@ -279,7 +293,9 @@ export class CashService {
 
     const wantsOverride = !!dto.adminOverride;
     if ((countedCash === null || countedCash === 0) && !wantsOverride) {
-      throw new BadRequestException("Falta countedCash para cerrar. (o usar adminOverride)");
+      throw new BadRequestException(
+        "Falta countedCash para cerrar. (o usar adminOverride)"
+      );
     }
     if (wantsOverride && !isAdmin) {
       throw new ForbiddenException("Solo ADMIN puede usar adminOverride.");
@@ -299,7 +315,7 @@ export class CashService {
           closedByUserId: userId,
           closeNote: (dto.note ?? "").trim(),
         },
-        { new: true },
+        { new: true }
       )
       .lean();
 
@@ -308,7 +324,8 @@ export class CashService {
 
   async reopenDay(user: any, dateKey: string, branchId?: string, note?: string) {
     assertDateKey(dateKey);
-    if (!hasRole(user, "ADMIN")) throw new ForbiddenException("Solo ADMIN puede reabrir caja.");
+    if (!hasRole(user, "ADMIN"))
+      throw new ForbiddenException("Solo ADMIN puede reabrir caja.");
 
     const bId = branchId ? oid(branchId, "branchId") : null;
     const day = await this.cashDayModel.findOne({ dateKey, branchId: bId });
@@ -325,7 +342,7 @@ export class CashService {
           diffCash: 0,
           closeNote: (note ?? "").trim(),
         },
-        { new: true },
+        { new: true }
       )
       .lean();
 
@@ -347,15 +364,15 @@ export class CashService {
   }
 
   /**
-   * ✅ Mejora clave:
-   * - crea CashMovement
-   * - crea FinanceMovement espejo (source=CASH)
-   * - recalcula expectedCash (aggregate)
+   * ✅ Crea CashMovement + FinanceMovement espejo + recalc expectedCash
    */
   async createMovement(user: any, dto: CreateMovementDto) {
-    const cashDay = await this.cashDayModel.findById(oid(dto.cashDayId, "cashDayId"));
+    const cashDay = await this.cashDayModel.findById(
+      oid(dto.cashDayId, "cashDayId")
+    );
     if (!cashDay) throw new NotFoundException("Caja no encontrada.");
-    if (cashDay.status === CashDayStatus.CLOSED) throw new BadRequestException("La caja está cerrada.");
+    if (cashDay.status === CashDayStatus.CLOSED)
+      throw new BadRequestException("La caja está cerrada.");
 
     await this.assertFinanceDayNotLocked(cashDay.dateKey, user);
 
@@ -382,9 +399,11 @@ export class CashService {
     });
 
     // 2) finance mirror
-    // Solo impacta CASH expectedCash cuando method=CASH, pero FINANCE debe registrar todo (transfer/card/etc)
     const finAccountId = await this.resolveFinanceAccountIdForMethod(dto.method);
-    if (!finAccountId) throw new BadRequestException("No hay FinanceAccount configurada para este método.");
+    if (!finAccountId)
+      throw new BadRequestException(
+        "No hay FinanceAccount configurada para este método."
+      );
 
     const finType =
       dto.type === CashMovementType.INCOME ? FinType.INCOME : FinType.EXPENSE;
@@ -407,9 +426,6 @@ export class CashService {
       refType,
       refId,
       cashDayId: cashDay._id,
-
-      // snapshots opcionales (si ya los manejás en finance)
-      // accountNameSnapshot, categoryNameSnapshot los podés setear si querés
     } as any);
 
     await this.recalcExpectedCash(String(cashDay._id));
@@ -417,9 +433,7 @@ export class CashService {
   }
 
   /**
-   * ✅ Mejora clave:
-   * - void cash movement
-   * - void finance movement espejo (source=CASH + cashDayId + refType/refId o por cashMovementId)
+   * ✅ Void CashMovement + void FinanceMovement espejo + recalc expectedCash
    */
   async voidMovement(user: any, movementId: string, reason?: string) {
     const mov = await this.movModel.findById(oid(movementId, "movementId"));
@@ -443,7 +457,7 @@ export class CashService {
           voidedByUserId: pickUserId(user),
           voidReason: (reason ?? "").trim(),
         },
-        { new: true },
+        { new: true }
       )
       .lean();
 
@@ -452,14 +466,13 @@ export class CashService {
       {
         source: "CASH",
         cashDayId: mov.cashDayId,
-        // opcional: si querés estrictísimo, agregá cashMovementId como campo en finance
         refType: mov.refType ?? null,
         refId: mov.refId ?? null,
         amount: mov.amount,
         dateKey: cashDay.dateKey,
         status: { $ne: "VOID" },
       } as any,
-      { $set: { status: "VOID" } } as any,
+      { $set: { status: "VOID" } } as any
     );
 
     await this.recalcExpectedCash(String(cashDay._id));
@@ -468,14 +481,21 @@ export class CashService {
 
   /**
    * ✅ expectedCash = openingCash + (CASH income - CASH expense) (voided=false)
-   * ahora con AGGREGATE (no fetch rows)
    */
   private async recalcExpectedCash(cashDayId: string) {
-    const day = await this.cashDayModel.findById(oid(cashDayId, "cashDayId")).lean();
+    const day = await this.cashDayModel
+      .findById(oid(cashDayId, "cashDayId"))
+      .lean();
     if (!day) throw new NotFoundException("Caja no encontrada.");
 
     const agg = await this.movModel.aggregate([
-      { $match: { cashDayId: new Types.ObjectId(cashDayId), voided: false, method: PaymentMethod.CASH } },
+      {
+        $match: {
+          cashDayId: new Types.ObjectId(cashDayId),
+          voided: false,
+          method: PaymentMethod.CASH,
+        },
+      },
       {
         $group: {
           _id: "$type",
@@ -499,9 +519,10 @@ export class CashService {
         cashDayId,
         {
           expectedCash,
-          diffCash: day.countedCash == null ? 0 : toMoney(day.countedCash) - expectedCash,
+          diffCash:
+            day.countedCash == null ? 0 : toMoney(day.countedCash) - expectedCash,
         },
-        { new: true },
+        { new: true }
       )
       .lean();
 
@@ -515,10 +536,8 @@ export class CashService {
   async getDaySummary(user: any, dateKey: string, branchId?: string) {
     assertDateKey(dateKey);
 
-    // get or create
     const dayPublic = await this.getOrCreateDay(user, dateKey, branchId);
 
-    // expectedCash up to date
     const recDay = await this.recalcExpectedCash(dayPublic.id);
     const cashDayObjectId = oid(dayPublic.id, "cashDayId");
 
@@ -541,7 +560,14 @@ export class CashService {
       if (!method || !type) continue;
 
       if (!methodMap[method]) {
-        methodMap[method] = { method, income: 0, expense: 0, net: 0, countIncome: 0, countExpense: 0 };
+        methodMap[method] = {
+          method,
+          income: 0,
+          expense: 0,
+          net: 0,
+          countIncome: 0,
+          countExpense: 0,
+        };
       }
 
       if (type === CashMovementType.INCOME) {
@@ -552,17 +578,30 @@ export class CashService {
         methodMap[method].countExpense += Number(row.count || 0);
       }
 
-      methodMap[method].net = methodMap[method].income - methodMap[method].expense;
+      methodMap[method].net =
+        methodMap[method].income - methodMap[method].expense;
     }
 
     const byMethod = Object.values(methodMap).sort((a: any, b: any) =>
-      String(a.method).localeCompare(String(b.method)),
+      String(a.method).localeCompare(String(b.method))
     );
 
     // Totales por categoría (lookup a FinanceCategory)
     const byCategoryAgg = await this.movModel.aggregate([
-      { $match: { cashDayId: cashDayObjectId, voided: false, categoryId: { $ne: null } } },
-      { $group: { _id: { categoryId: "$categoryId", type: "$type" }, total: { $sum: "$amount" }, count: { $sum: 1 } } },
+      {
+        $match: {
+          cashDayId: cashDayObjectId,
+          voided: false,
+          categoryId: { $ne: null },
+        },
+      },
+      {
+        $group: {
+          _id: { categoryId: "$categoryId", type: "$type" },
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        },
+      },
       {
         $lookup: {
           from: "financecategories",
@@ -614,11 +653,17 @@ export class CashService {
     }
 
     const byCategory = Object.values(catMap).sort((a: any, b: any) =>
-      String(a.name).localeCompare(String(b.name)),
+      String(a.name).localeCompare(String(b.name))
     );
 
-    const totalIncome = byMethod.reduce((acc: number, x: any) => acc + Number(x.income || 0), 0);
-    const totalExpense = byMethod.reduce((acc: number, x: any) => acc + Number(x.expense || 0), 0);
+    const totalIncome = byMethod.reduce(
+      (acc: number, x: any) => acc + Number(x.income || 0),
+      0
+    );
+    const totalExpense = byMethod.reduce(
+      (acc: number, x: any) => acc + Number(x.expense || 0),
+      0
+    );
     const net = totalIncome - totalExpense;
 
     const cashRow = byMethod.find((x: any) => x.method === PaymentMethod.CASH);

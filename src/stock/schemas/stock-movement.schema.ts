@@ -12,6 +12,10 @@ function isFiniteNumber(v: any) {
 
 @Schema({ timestamps: true })
 export class StockMovement {
+  // ✅ NUEVO
+  @Prop({ type: Types.ObjectId, ref: 'Branch', required: true, index: true })
+  branchId: Types.ObjectId;
+
   @Prop({ required: true, index: true })
   dateKey: string; // YYYY-MM-DD
 
@@ -24,10 +28,6 @@ export class StockMovement {
   @Prop({ type: String, enum: StockMovementType, required: true, index: true })
   type: StockMovementType;
 
-  // qty SIGNED:
-  // IN  => > 0
-  // OUT => < 0
-  // ADJUST / REVERSAL => != 0
   @Prop({
     type: Number,
     required: true,
@@ -50,7 +50,6 @@ export class StockMovement {
   })
   qty: number;
 
-  // ✅ Nuevo: saldo luego de aplicar el movimiento (para auditoría rápida)
   @Prop({ type: Number, default: null })
   qtyAfter?: number | null;
 
@@ -65,43 +64,41 @@ export class StockMovement {
   @Prop({ type: String, default: null, index: true })
   refType?: string | null;
 
-  // ✅ Mejor: ObjectId (si tu ref apunta a docs Mongo). Si querés refs externas,
-  // podés sumar un refIdText aparte.
   @Prop({ type: Types.ObjectId, default: null, index: true })
   refId?: Types.ObjectId | null;
 
   @Prop({ type: String, default: '' })
   note?: string;
 
-  // ✅ Mejor: ObjectId + ref User
   @Prop({ type: Types.ObjectId, ref: 'User', default: null, index: true })
   createdByUserId?: Types.ObjectId | null;
 
-  // ✅ Nuevo: clave idempotente para evitar duplicados (unique cuando existe)
   @Prop({ type: String, default: null, index: true })
   dedupeKey?: string | null;
 }
 
 export const StockMovementSchema = SchemaFactory.createForClass(StockMovement);
 
-// Listados comunes
-StockMovementSchema.index({ ingredientId: 1, createdAt: -1 });
-StockMovementSchema.index({ dateKey: 1, createdAt: -1 });
+// ✅ Índices actualizados con branchId
+StockMovementSchema.index({ branchId: 1, ingredientId: 1, createdAt: -1 });
+StockMovementSchema.index({ branchId: 1, dateKey: 1, createdAt: -1 });
+StockMovementSchema.index({ branchId: 1, ingredientId: 1, dateKey: 1 });
+StockMovementSchema.index({ branchId: 1, refType: 1, refId: 1 });
 
-// Filtros típicos por rango
-StockMovementSchema.index({ ingredientId: 1, dateKey: 1 });
-
-// Búsqueda por referencia
-StockMovementSchema.index({ refType: 1, refId: 1 });
-
-// ✅ Idempotencia real (solo cuando dedupeKey es string)
+// ✅ Idempotencia real (pero aislada por branch)
 StockMovementSchema.index(
-  { dedupeKey: 1 },
+  { branchId: 1, dedupeKey: 1 },
   {
     unique: true,
     partialFilterExpression: { dedupeKey: { $type: 'string' } },
   },
 );
 
-// (Opcional) si querés mantener el índice anterior para queries legacy:
-StockMovementSchema.index({ refType: 1, refId: 1, ingredientId: 1, type: 1 });
+// (Opcional) si tenías legacy:
+StockMovementSchema.index({
+  branchId: 1,
+  refType: 1,
+  refId: 1,
+  ingredientId: 1,
+  type: 1,
+});

@@ -19,20 +19,22 @@ export class StockSnapshotItem {
 
 @Schema({ timestamps: true })
 export class StockSnapshot {
+  // ✅ NUEVO
+  @Prop({ type: Types.ObjectId, ref: 'Branch', required: true, index: true })
+  branchId: Types.ObjectId;
+
   @Prop({ required: true, index: true })
-  dateKey: string; // corte (YYYY-MM-DD)
+  dateKey: string; // YYYY-MM-DD
 
   @Prop({ type: [StockSnapshotItem], default: [] })
   items: StockSnapshotItem[];
 
-  // ✅ Mejor: ObjectId + ref User
   @Prop({ type: Types.ObjectId, ref: 'User', default: null, index: true })
   createdByUserId?: Types.ObjectId | null;
 
   @Prop({ type: String, default: '' })
   note?: string;
 
-  // ✅ Nuevo: metadata útil para reportes
   @Prop({ type: String, default: 'AUTO', index: true })
   source?: 'AUTO' | 'MANUAL';
 
@@ -45,7 +47,6 @@ export class StockSnapshot {
 
 export const StockSnapshotSchema = SchemaFactory.createForClass(StockSnapshot);
 
-StockSnapshotSchema.index({ dateKey: 1 }, { unique: true });
-
-// (Opcional) si listás por fecha descendente:
-StockSnapshotSchema.index({ createdAt: -1 });
+// ✅ Cambiar unique (antes era {dateKey} global)
+StockSnapshotSchema.index({ branchId: 1, dateKey: 1 }, { unique: true });
+StockSnapshotSchema.index({ branchId: 1, createdAt: -1 });

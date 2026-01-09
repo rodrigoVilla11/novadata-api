@@ -14,18 +14,11 @@ function num(v: any) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function assertId(id: string, name = 'id') {
-  const s = String(id || '').trim();
-  if (!s) throw new BadRequestException(`${name} is required`);
-  return s;
-}
-
 function pickFulfillment(v: any): OrderFulfillment {
   const s = String(v || '').toUpperCase();
   if (s === 'DINE_IN') return OrderFulfillment.DINE_IN;
   if (s === 'DELIVERY') return OrderFulfillment.DELIVERY;
   if (s === 'TAKEAWAY') return OrderFulfillment.TAKEAWAY;
-  // default razonable POS: takeaway
   return OrderFulfillment.TAKEAWAY;
 }
 
@@ -42,10 +35,31 @@ export class OrdersService {
   ) {}
 
   // ============================
+  // Helpers ObjectId
+  // ============================
+
+  private oidOrThrow(id: string, name: string) {
+    const s = String(id ?? '').trim();
+    if (!s) throw new BadRequestException(`${name} is required`);
+    if (!Types.ObjectId.isValid(s))
+      throw new BadRequestException(`${name} must be a valid ObjectId`);
+    return new Types.ObjectId(s);
+  }
+
+  private oidOrNull(id?: string | null, name = 'id') {
+    const s = String(id ?? '').trim();
+    if (!s) return null;
+    if (!Types.ObjectId.isValid(s))
+      throw new BadRequestException(`${name} must be a valid ObjectId`);
+    return new Types.ObjectId(s);
+  }
+
+  // ============================
   // Create
   // ============================
 
   async create(input: {
+    branchId: string; // ✅ requerido
     source: 'POS' | 'ONLINE';
     fulfillment?: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY';
     customerId?: string | null;
@@ -59,19 +73,19 @@ export class OrdersService {
     note?: string | null;
     items?: Array<{ productId: string; qty: number; note?: string | null }>;
   }) {
+    const branchObjId = this.oidOrThrow(input.branchId, 'branchId');
+
     const source = input.source === 'ONLINE' ? 'ONLINE' : 'POS';
     const fulfillment = pickFulfillment(input.fulfillment);
 
-    const customerId = input.customerId
-      ? new Types.ObjectId(input.customerId)
-      : null;
+    const customerObjId = this.oidOrNull(input.customerId, 'customerId');
 
     const initialStatus =
       source === 'ONLINE' ? OrderStatus.PENDING : OrderStatus.DRAFT;
 
     const items =
       input.items && input.items.length
-        ? await this.buildItemsFromProductIds(input.items)
+        ? await this.buildItemsFromProductIds(branchObjId, input.items)
         : [];
 
     const totals = this.computeTotals(items);
@@ -86,8 +100,7 @@ export class OrdersService {
         }
       : null;
 
-    // Regla simple: si es DELIVERY y no hay customerId, pedimos al menos nombre o dirección
-    if (fulfillment === OrderFulfillment.DELIVERY && !customerId) {
+    if (fulfillment === OrderFulfillment.DELIVERY && !customerObjId) {
       const hasSome =
         !!snapshot?.name || !!snapshot?.phone || !!snapshot?.addressLine1;
       if (!hasSome) {
@@ -98,15 +111,16 @@ export class OrdersService {
     }
 
     const doc = await this.orderModel.create({
+      branchId: branchObjId,
       status: initialStatus,
       source,
       fulfillment,
-      customerId,
+      customerId: customerObjId,
       customerSnapshot: snapshot,
       note: input.note ?? null,
       items,
       ...totals,
-    });
+    } as any);
 
     return this.toDto(doc);
   }
@@ -115,26 +129,32 @@ export class OrdersService {
   // Read
   // ============================
 
-  async findAll(params?: {
+  async findAll(params: {
+    branchId: string; // ✅ requerido
     status?: OrderStatus;
     source?: 'POS' | 'ONLINE';
     fulfillment?: OrderFulfillment;
     customerId?: string;
-    q?: string;
+    q?: string; // opcional: busca por _id
     limit?: number;
   }) {
-    const filter: any = {};
+    const branchObjId = this.oidOrThrow(params.branchId, 'branchId');
+
+    const filter: any = { branchId: branchObjId };
 
     if (params?.status) filter.status = params.status;
     if (params?.source) filter.source = params.source;
     if (params?.fulfillment) filter.fulfillment = params.fulfillment;
 
-    if (params?.customerId)
-      filter.customerId = new Types.ObjectId(params.customerId);
+    if (params?.customerId) {
+      filter.customerId = this.oidOrThrow(params.customerId, 'customerId');
+    }
 
     if (params?.q?.trim()) {
       const q = params.q.trim();
-      filter.$or = [{ _id: q }];
+      // soporta buscar por _id si es ObjectId
+      if (Types.ObjectId.isValid(q)) filter._id = new Types.ObjectId(q);
+      else filter._id = q; // si usás ids string (raro), lo deja
     }
 
     const limit = Math.min(200, Math.max(1, Number(params?.limit ?? 50)));
@@ -148,22 +168,31 @@ export class OrdersService {
     return rows.map((x: any) => this.toDto(x));
   }
 
-  async findOne(id: string) {
-    const doc = await this.orderModel.findById(id).lean();
+  async findOne(branchId: string, id: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(id, 'orderId');
+
+    const doc = await this.orderModel
+      .findOne({ _id: orderObjId, branchId: branchObjId })
+      .lean();
+
     if (!doc) throw new NotFoundException('Order not found');
     return this.toDto(doc);
   }
 
   // ============================
-  // Edit fulfillment / customer snapshot (solo DRAFT o PENDING)
+  // Edit fulfillment / snapshot (solo DRAFT o PENDING)
   // ============================
 
   async setFulfillment(
+    branchId: string,
     orderId: string,
     fulfillment: OrderFulfillment | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY',
   ) {
-    assertId(orderId, 'orderId');
-    const doc = await this.orderModel.findById(orderId);
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+
+    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -178,6 +207,7 @@ export class OrdersService {
   }
 
   async setCustomerSnapshot(
+    branchId: string,
     orderId: string,
     customerSnapshot: {
       name?: string | null;
@@ -187,8 +217,10 @@ export class OrdersService {
       notes?: string | null;
     } | null,
   ) {
-    assertId(orderId, 'orderId');
-    const doc = await this.orderModel.findById(orderId);
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+
+    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -211,9 +243,8 @@ export class OrdersService {
       notes: cleanStr(customerSnapshot.notes),
     } as any;
 
-    // si queda en DELIVERY sin customerId, chequeo mínimo
     if (doc.fulfillment === OrderFulfillment.DELIVERY && !doc.customerId) {
-      const s = doc.customerSnapshot as any;
+      const s: any = doc.customerSnapshot;
       const hasSome = !!s?.name || !!s?.phone || !!s?.addressLine1;
       if (!hasSome) {
         throw new BadRequestException(
@@ -227,17 +258,21 @@ export class OrdersService {
   }
 
   // ============================
-  // Edit items (solo DRAFT o PENDING)
+  // Edit items / note (solo DRAFT o PENDING)
   // ============================
 
   async setItems(
+    branchId: string,
     orderId: string,
     items: Array<{ productId: string; qty: number; note?: string | null }>,
   ) {
-    assertId(orderId, 'orderId');
-    if (!Array.isArray(items)) throw new BadRequestException('items[] is required');
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
 
-    const existing = await this.orderModel.findById(orderId);
+    if (!Array.isArray(items))
+      throw new BadRequestException('items[] is required');
+
+    const existing = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
     if (!existing) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(existing.status)) {
@@ -246,7 +281,7 @@ export class OrdersService {
       );
     }
 
-    const built = await this.buildItemsFromProductIds(items);
+    const built = await this.buildItemsFromProductIds(branchObjId, items);
     const totals = this.computeTotals(built);
 
     existing.items = built as any;
@@ -257,8 +292,11 @@ export class OrdersService {
     return this.toDto(existing);
   }
 
-  async setNote(orderId: string, note: string | null) {
-    const doc = await this.orderModel.findById(orderId);
+  async setNote(branchId: string, orderId: string, note: string | null) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+
+    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -276,16 +314,20 @@ export class OrdersService {
   // Status transitions
   // ============================
 
-  async accept(orderId: string) {
-    const doc = await this.orderModel.findById(orderId);
+  async accept(branchId: string, orderId: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+
+    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
-      throw new BadRequestException(`Cannot accept when status is ${doc.status}`);
+      throw new BadRequestException(
+        `Cannot accept when status is ${doc.status}`,
+      );
     }
     if (!doc.items?.length) throw new BadRequestException('Order has no items');
 
-    // Si es delivery y no hay customerId, exigimos snapshot mínimo
     if (doc.fulfillment === OrderFulfillment.DELIVERY && !doc.customerId) {
       const s: any = doc.customerSnapshot;
       const hasSome = !!s?.name || !!s?.phone || !!s?.addressLine1;
@@ -299,39 +341,49 @@ export class OrdersService {
     doc.status = OrderStatus.ACCEPTED;
     doc.acceptedAt = new Date();
     doc.rejectionReason = null;
-    await doc.save();
 
+    await doc.save();
     return this.toDto(doc);
   }
 
-  async reject(orderId: string, reason?: string | null) {
-    const doc = await this.orderModel.findById(orderId);
+  async reject(branchId: string, orderId: string, reason?: string | null) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+
+    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
-      throw new BadRequestException(`Cannot reject when status is ${doc.status}`);
+      throw new BadRequestException(
+        `Cannot reject when status is ${doc.status}`,
+      );
     }
 
     doc.status = OrderStatus.REJECTED;
     doc.rejectedAt = new Date();
     doc.rejectionReason = reason ? String(reason).trim() : null;
-    await doc.save();
 
+    await doc.save();
     return this.toDto(doc);
   }
 
-  async cancel(orderId: string) {
-    const doc = await this.orderModel.findById(orderId);
+  async cancel(branchId: string, orderId: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+
+    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
     if (!doc) throw new NotFoundException('Order not found');
 
     if ([OrderStatus.ACCEPTED, OrderStatus.REJECTED].includes(doc.status)) {
-      throw new BadRequestException(`Cannot cancel when status is ${doc.status}`);
+      throw new BadRequestException(
+        `Cannot cancel when status is ${doc.status}`,
+      );
     }
 
     doc.status = OrderStatus.CANCELLED;
     doc.cancelledAt = new Date();
-    await doc.save();
 
+    await doc.save();
     return this.toDto(doc);
   }
 
@@ -340,6 +392,7 @@ export class OrdersService {
   // ============================
 
   private async buildItemsFromProductIds(
+    branchObjId: Types.ObjectId,
     rawItems: Array<{ productId: string; qty: number; note?: string | null }>,
   ) {
     if (!rawItems.length) return [];
@@ -350,11 +403,16 @@ export class OrdersService {
     >();
 
     for (const it of rawItems) {
-      const productId = assertId(it.productId, 'productId');
+      const productId = String(it.productId ?? '').trim();
+      if (!productId)
+        throw new BadRequestException('productId is required');
+      if (!Types.ObjectId.isValid(productId))
+        throw new BadRequestException('productId must be a valid ObjectId');
+
       const qty = num(it.qty);
-      if (!Number.isFinite(qty) || qty <= 0) {
+      if (!Number.isFinite(qty) || qty <= 0)
         throw new BadRequestException('qty must be > 0');
-      }
+
       const prev = merged.get(productId);
       if (!prev) merged.set(productId, { productId, qty, note: it.note ?? null });
       else prev.qty += qty;
@@ -363,8 +421,14 @@ export class OrdersService {
     const ids = Array.from(merged.values()).map(
       (x) => new Types.ObjectId(x.productId),
     );
+
+    // ⚠️ Si Product NO tiene branchId, sacá branchId del filter.
     const products = await this.productModel
-      .find({ _id: { $in: ids }, isActive: { $ne: false } })
+      .find({
+        _id: { $in: ids },
+        branchId: branchObjId,
+        isActive: { $ne: false },
+      } as any)
       .select({ name: 1, salePrice: 1, computed: 1 })
       .lean();
 
@@ -375,11 +439,16 @@ export class OrdersService {
 
     for (const it of merged.values()) {
       const p = byId.get(it.productId);
-      if (!p) throw new BadRequestException(`Product not found/active: ${it.productId}`);
+      if (!p)
+        throw new BadRequestException(
+          `Product not found/active in branch: ${it.productId}`,
+        );
 
       const salePrice = p.salePrice != null ? num(p.salePrice) : null;
       const suggested =
-        p?.computed?.suggestedPrice != null ? num(p.computed.suggestedPrice) : null;
+        p?.computed?.suggestedPrice != null
+          ? num(p.computed.suggestedPrice)
+          : null;
 
       const unitPrice = salePrice ?? suggested ?? 0;
       if (!Number.isFinite(unitPrice) || unitPrice < 0) {
@@ -410,6 +479,9 @@ export class OrdersService {
   private toDto(doc: any) {
     return {
       id: String(doc._id ?? doc.id),
+
+      branchId: doc.branchId ? String(doc.branchId) : null,
+
       status: doc.status,
       source: doc.source,
       fulfillment: doc.fulfillment,

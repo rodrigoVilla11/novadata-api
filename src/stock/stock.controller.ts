@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { StockService } from './stock.service';
 import { StockMovementReason, StockMovementType } from './enums/stock.enums';
@@ -10,13 +19,22 @@ import { Roles } from 'src/auth/roles.decorator';
 export class StockController {
   constructor(private readonly stockService: StockService) {}
 
+  private getBranchIdOrThrow(req: any) {
+    const branchId = req?.user?.branchId ? String(req.user.branchId) : '';
+    if (!branchId) throw new BadRequestException('branchId is required');
+    return branchId;
+  }
+
   /**
    * POST /stock/sale
    * Aplica una venta (descuenta ingredientes según recetas)
    */
   @Post('sale')
   applySale(@Req() req: any, @Body() body: any) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.stockService.applySale({
+      branchId,
       dateKey: body?.dateKey,
       saleId: body?.saleId,
       lines: body?.lines ?? [],
@@ -31,7 +49,10 @@ export class StockController {
    */
   @Post('sale-reversal')
   applySaleReversal(@Req() req: any, @Body() body: any) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.stockService.applySaleReversal({
+      branchId,
       dateKey: body?.dateKey,
       saleId: body?.saleId,
       lines: body?.lines ?? [],
@@ -46,12 +67,15 @@ export class StockController {
    */
   @Post('manual')
   applyManual(@Req() req: any, @Body() body: any) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.stockService.applyManual({
+      branchId,
       dateKey: body?.dateKey,
       type: body?.type as StockMovementType,
       reason: body?.reason as StockMovementReason,
       refType: body?.refType ?? null,
-      refId: body?.refId ?? null, // ObjectId string (si querés idempotencia)
+      refId: body?.refId ?? null,
       items: body?.items ?? [],
       note: body?.note ?? null,
       userId: req?.user?._id ? String(req.user._id) : null,
@@ -63,8 +87,11 @@ export class StockController {
    * Balance actual (rápido) desde Ingredient.stock.onHand
    */
   @Get('balances')
-  getBalances(@Query('ingredientId') ingredientId?: string) {
+  getBalances(@Req() req: any, @Query('ingredientId') ingredientId?: string) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.stockService.getBalances({
+      branchId,
       ingredientId: ingredientId?.trim() ? ingredientId.trim() : null,
     });
   }
@@ -75,13 +102,17 @@ export class StockController {
    */
   @Get('movements')
   listMovements(
+    @Req() req: any,
     @Query('dateKey') dateKey?: string,
     @Query('ingredientId') ingredientId?: string,
     @Query('refType') refType?: string,
     @Query('refId') refId?: string,
     @Query('limit') limit?: string,
   ) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.stockService.listMovements({
+      branchId,
       dateKey: dateKey?.trim() ? dateKey.trim() : undefined,
       ingredientId: ingredientId?.trim() ? ingredientId.trim() : null,
       refType: refType?.trim() ? refType.trim() : null,

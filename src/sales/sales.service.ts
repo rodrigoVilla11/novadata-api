@@ -14,11 +14,7 @@ import {
 } from 'src/cash/schemas/cash-movement.schema';
 
 import { Order } from 'src/orders/schemas/order.schema';
-
 import { Sale, SaleStatus } from './schemas/sale.schema';
-
-// Si ya tenés StockService, lo inyectamos.
-// Ajustá el import al path real de tu módulo de stock.
 import { StockService } from 'src/stock/stock.service';
 
 function pickUserId(u: any) {
@@ -44,49 +40,56 @@ export class SalesService {
     private readonly stockService: StockService,
   ) {}
 
+  private oidOrThrow(id: string, label: string) {
+    const s = String(id ?? '').trim();
+    if (!s) throw new BadRequestException(`${label} is required`);
+    if (!Types.ObjectId.isValid(s))
+      throw new BadRequestException(`${label} must be a valid ObjectId`);
+    return new Types.ObjectId(s);
+  }
+
   // ============================
   // Create from order
   // ============================
 
-  async createFromOrder(user: any, orderId: string) {
+  async createFromOrder(user: any, branchId: string, orderId: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
     if (!orderId) throw new BadRequestException('orderId is required');
 
-    const order = await this.orderModel.findById(orderId).lean();
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+    const order = await this.orderModel.findById(orderObjId).lean();
     if (!order) throw new NotFoundException('Order not found');
 
-    // Permitimos crear sale si el order fue ACCEPTED (ideal),
-    // o si lo estás usando en POS como “directo”.
     if (!(order as any).items?.length) {
       throw new BadRequestException('Order has no items');
     }
 
-    // evitar duplicado sale por orderId
+    // ✅ evitar duplicado sale por (branchId, orderId)
     const existing = await this.saleModel.findOne({
-      orderId: new Types.ObjectId(orderId),
+      branchId: branchObjId,
+      orderId: orderObjId,
     });
     if (existing)
       throw new ConflictException('Sale already exists for this order');
 
     const items = (order as any).items.map((it: any) => ({
-      productId: new Types.ObjectId(String(it.productId)),
+      productId: this.oidOrThrow(String(it.productId), 'productId'),
       qty: num(it.qty),
       unitPrice: money(it.unitPrice),
       lineTotal: money(it.lineTotal),
       note: it.note ?? null,
     }));
 
-    const subtotal = items.reduce(
-      (acc: number, x: any) => acc + money(x.lineTotal),
-      0,
-    );
+    const subtotal = items.reduce((acc: number, x: any) => acc + money(x.lineTotal), 0);
     const total = subtotal;
 
     const sale = await this.saleModel.create({
+      branchId: branchObjId,
       status: SaleStatus.DRAFT,
       source: (order as any).source === 'ONLINE' ? 'ONLINE' : 'POS',
-      orderId: new Types.ObjectId(orderId),
+      orderId: orderObjId,
       customerId: (order as any).customerId
-        ? new Types.ObjectId(String((order as any).customerId))
+        ? this.oidOrThrow(String((order as any).customerId), 'customerId')
         : null,
       items,
       subtotal,
@@ -106,13 +109,15 @@ export class SalesService {
   // Read
   // ============================
 
-  async findAll(params?: {
+  async findAll(branchId: string, params?: {
     status?: SaleStatus;
     from?: string; // ISO
     to?: string; // ISO
     limit?: number;
   }) {
-    const filter: any = {};
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+
+    const filter: any = { branchId: branchObjId };
 
     if (params?.status) filter.status = params.status;
 
@@ -129,36 +134,47 @@ export class SalesService {
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
+
     return rows.map((x: any) => this.toDto(x));
   }
 
-  async findByOrderId(orderId: string) {
-    if (!orderId) throw new BadRequestException('orderId is required');
+  async findByOrderId(branchId: string, orderId: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const orderObjId = this.oidOrThrow(orderId, 'orderId');
+
     const doc = await this.saleModel
-      .findOne({ orderId: new Types.ObjectId(orderId) })
+      .findOne({ branchId: branchObjId, orderId: orderObjId })
       .lean();
+
     return doc ? this.toDto(doc) : null;
   }
 
-  async findOne(id: string) {
-    const doc = await this.saleModel.findById(id).lean();
+  async findOne(branchId: string, id: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const saleObjId = this.oidOrThrow(id, 'saleId');
+
+    const doc = await this.saleModel
+      .findOne({ _id: saleObjId, branchId: branchObjId })
+      .lean();
+
     if (!doc) throw new NotFoundException('Sale not found');
     return this.toDto(doc);
   }
 
   // ============================
-  // Pay (generates cash movements + stock movements)
+  // Pay (cash + stock)
   // ============================
 
   /**
    * Cobra una venta.
-   * - Crea movimientos INCOME en Cash (uno por payment method).
-   * - Descuenta stock automáticamente (usando tu StockService).
+   * - Crea movimientos INCOME en Cash
+   * - Descuenta stock (StockService)
    *
    * Requiere dateKey (YYYY-MM-DD) para imputar en caja del día.
    */
   async pay(
     user: any,
+    branchId: string,
     saleId: string,
     dto: {
       dateKey: string;
@@ -172,21 +188,22 @@ export class SalesService {
       categoryId?: string | null;
     },
   ) {
-    if (!saleId) throw new BadRequestException('saleId is required');
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const saleObjId = this.oidOrThrow(saleId, 'saleId');
+
     if (!dto?.dateKey) throw new BadRequestException('dateKey is required');
     if (!Array.isArray(dto.payments) || dto.payments.length === 0) {
       throw new BadRequestException('payments[] is required');
     }
 
-    // 0) leer venta (para total/items)
-    const sale0 = await this.saleModel.findById(saleId).lean();
+    // 0) leer venta (con branch)
+    const sale0 = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId }).lean();
     if (!sale0) throw new NotFoundException('Sale not found');
 
     if (sale0.status === SaleStatus.VOIDED || (sale0 as any).voided) {
       throw new BadRequestException('Sale is VOIDED');
     }
-    if (!(sale0 as any).items?.length)
-      throw new BadRequestException('Sale has no items');
+    if (!(sale0 as any).items?.length) throw new BadRequestException('Sale has no items');
 
     const total = money((sale0 as any).total);
 
@@ -198,8 +215,7 @@ export class SalesService {
       }))
       .filter((p) => p.amount > 0);
 
-    if (!payments.length)
-      throw new BadRequestException('payments total must be > 0');
+    if (!payments.length) throw new BadRequestException('payments total must be > 0');
 
     const paidTotal = payments.reduce((acc, p) => acc + money(p.amount), 0);
 
@@ -209,21 +225,23 @@ export class SalesService {
       );
     }
 
-    // 1) Lock/idempotencia: si ya está PAID devolvemos la venta (no repetimos efectos)
+    // 1) idempotencia: si ya está PAID, devolvemos
     if (sale0.status === SaleStatus.PAID) {
-      const already = await this.saleModel.findById(saleId).lean();
+      const already = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId }).lean();
       return this.toDto(already);
     }
 
+    // 2) lock optimista: sólo DRAFT en este branch
     const locked = await this.saleModel.findOneAndUpdate(
       {
-        _id: new Types.ObjectId(saleId),
+        _id: saleObjId,
+        branchId: branchObjId,
         status: SaleStatus.DRAFT,
         voided: { $ne: true },
       },
       {
         $set: {
-          status: SaleStatus.PAID, // lock optimista
+          status: SaleStatus.PAID,
           paidAt: new Date(),
           paidByUserId: pickUserId(user),
           paidDateKey: dto.dateKey,
@@ -233,21 +251,21 @@ export class SalesService {
     );
 
     if (!locked) {
-      // Otro proceso lo pagó o cambió el estado
-      const cur = await this.saleModel.findById(saleId).lean();
+      const cur = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId }).lean();
       if (!cur) throw new NotFoundException('Sale not found');
       if (cur.status === SaleStatus.PAID) return this.toDto(cur);
       throw new BadRequestException(`Sale status is ${cur.status}, cannot pay`);
     }
 
-    // 2) Caja del día
+    // 3) caja del día (✅ ideal: tu CashDay debe ser por branch)
+    // Si tu firma es getOrCreateDay(user, dateKey, branchId) => pasalo acá.
     const day = await this.cashService.getOrCreateDay(
       user,
       dto.dateKey,
-      undefined,
+      branchId, // 👈 importante: si tu cash ya es multi-branch
     );
 
-    // 3) Movimientos de caja (uno por método)
+    // 4) movimientos de caja
     const conceptBase = (dto.concept ?? 'VENTA').trim() || 'VENTA';
     const saleLabel = `Sale ${String(locked._id)}`;
 
@@ -262,31 +280,31 @@ export class SalesService {
         note: `${saleLabel}${p.note ? ` - ${p.note}` : ''}`,
         refType: 'SALE',
         refId: String(locked._id),
+        branchId, // 👈 si tu CashMovement tiene branchId, pasalo
       } as any);
     }
 
-    // 4) Stock (descuento por receta/producto) — ideal con idempotencia interna
+    // 5) stock (✅ ahora con branchId)
     await this.stockService.applySale({
+      branchId,
       dateKey: dto.dateKey,
       saleId: String(sale0._id),
-      userId: user?.id ? String(user.id) : null,
+      userId: pickUserId(user) ? String(pickUserId(user)) : null,
       note: dto.note ?? null,
       lines: (sale0.items ?? []).map((it: any) => ({
         productId: String(it.productId),
         qty: Number(it.qty ?? 0),
       })),
-    });
+    } as any);
 
-    // 5) Completar datos de pago (payments/paidTotal/note)
-    const updated = await this.saleModel.findByIdAndUpdate(
-      locked._id,
+    // 6) completar payments/paidTotal/note (ya está PAID)
+    const updated = await this.saleModel.findOneAndUpdate(
+      { _id: saleObjId, branchId: branchObjId },
       {
         $set: {
           payments: payments as any,
           paidTotal,
-          note: dto.note
-            ? String(dto.note).trim()
-            : ((sale0 as any).note ?? null),
+          note: dto.note ? String(dto.note).trim() : ((sale0 as any).note ?? null),
         },
       },
       { new: true },
@@ -301,38 +319,38 @@ export class SalesService {
 
   async voidSale(
     user: any,
+    branchId: string,
     saleId: string,
     reason?: string | null,
-    overrideDateKey?: string | null, // opcional si querés forzar
+    overrideDateKey?: string | null,
   ) {
-    const sale = await this.saleModel.findById(saleId);
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+    const saleObjId = this.oidOrThrow(saleId, 'saleId');
+
+    const sale = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId });
     if (!sale) throw new NotFoundException('Sale not found');
 
     if (sale.status === SaleStatus.VOIDED || sale.voided) {
       return this.toDto(sale);
     }
 
-    // Si estaba PAID => reversa contable
     if (sale.status === SaleStatus.PAID) {
-      const dateKey = overrideDateKey ?? sale.paidDateKey;
+      const dateKey = overrideDateKey ?? (sale as any).paidDateKey;
       if (!dateKey) {
-        throw new BadRequestException(
-          'paidDateKey missing: provide overrideDateKey',
-        );
+        throw new BadRequestException('paidDateKey missing: provide overrideDateKey');
       }
 
-      // 1) caja del mismo día
+      // caja mismo día / mismo branch
       const day = await this.cashService.getOrCreateDay(
         user,
         dateKey,
-        undefined,
+        branchId,
       );
 
-      // 2) reversa de caja: EXPENSE por cada pago (mismo método/monto)
       const concept = 'REVERSION VENTA';
       const saleLabel = `Void Sale ${String(sale._id)}`;
 
-      for (const p of sale.payments ?? []) {
+      for (const p of (sale as any).payments ?? []) {
         await this.cashService.createMovement(user, {
           cashDayId: day.id,
           type: CashMovementType.EXPENSE,
@@ -341,26 +359,26 @@ export class SalesService {
           categoryId: null,
           concept,
           note: `${saleLabel}${p.note ? ` - ${p.note}` : ''}`,
-
           refType: 'SALE_VOID',
           refId: String(sale._id),
+          branchId,
         } as any);
       }
 
-      // 3) stock: reponer ingredientes (IN)
+      // stock reversal (✅ con branchId)
       await this.stockService.applySaleReversal({
+        branchId,
         dateKey,
         saleId: String(sale._id),
-        lines: (sale.items ?? []).map((it: any) => ({
+        lines: ((sale as any).items ?? []).map((it: any) => ({
           productId: String(it.productId),
           qty: num(it.qty),
         })),
         note: reason ?? null,
         userId: pickUserId(user),
-      });
+      } as any);
     }
 
-    // 4) marcar VOIDED
     sale.status = SaleStatus.VOIDED;
     sale.voided = true;
     sale.voidedAt = new Date();
@@ -377,6 +395,8 @@ export class SalesService {
   private toDto(doc: any) {
     return {
       id: String(doc._id ?? doc.id),
+      branchId: doc.branchId ? String(doc.branchId) : null,
+
       status: doc.status,
       source: doc.source,
 
@@ -402,6 +422,7 @@ export class SalesService {
 
       paidTotal: num(doc.paidTotal),
       paidAt: doc.paidAt ?? null,
+      paidDateKey: doc.paidDateKey ?? null,
 
       note: doc.note ?? null,
 

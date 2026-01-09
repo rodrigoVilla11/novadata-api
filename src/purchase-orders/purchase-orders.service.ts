@@ -6,20 +6,19 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+
 import {
   PurchaseOrder,
   PurchaseOrderDocument,
 } from './schemas/purchase-order.schema';
 import { Supplier } from 'src/suppliers/schemas/supplier.schema';
 import { Ingredient } from 'src/ingredients/schemas/ingredients.schema';
+
 import { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
 import { PurchaseOrderStatus } from './enums/purchase-order.enums';
 import { ReceivePurchaseOrderDto } from './dto/receive.dto';
 import { AttachInvoiceDto } from './dto/attach-invoice.dto';
-import {
-  StockMovementReason,
-  StockMovementType,
-} from 'src/stock/enums/stock.enums';
+
 import { Unit } from 'src/ingredients/enums/unit.enum';
 import { StockService } from 'src/stock/stock.service';
 
@@ -36,7 +35,9 @@ function num(v: any) {
   const n = Number(v ?? 0);
   return Number.isFinite(n) ? n : 0;
 }
+
 const UPDATE_AVG_COST = true;
+
 @Injectable()
 export class PurchaseOrdersService {
   constructor(
@@ -46,6 +47,22 @@ export class PurchaseOrdersService {
     @InjectModel(Ingredient.name) private ingredientModel: Model<Ingredient>,
     private readonly stockService: StockService,
   ) {}
+
+  private oidOrThrow(id: string, label: string) {
+    const s = String(id ?? '').trim();
+    if (!s) throw new BadRequestException(`${label} is required`);
+    if (!Types.ObjectId.isValid(s))
+      throw new BadRequestException(`${label} must be a valid ObjectId`);
+    return new Types.ObjectId(s);
+  }
+
+  private oidOrNull(id?: string | null, label?: string) {
+    const s = String(id ?? '').trim();
+    if (!s) return null;
+    if (!Types.ObjectId.isValid(s))
+      throw new BadRequestException(`${label ?? 'id'} must be a valid ObjectId`);
+    return new Types.ObjectId(s);
+  }
 
   private calcApprox(items: any[]) {
     let approxTotal = 0;
@@ -69,38 +86,95 @@ export class PurchaseOrdersService {
     return realTotal;
   }
 
-  async create(dto: CreatePurchaseOrderDto) {
-    const supplier = await this.supplierModel.findById(dto.supplierId).lean();
+  private toResponse(d: any) {
+    return {
+      id: String(d._id),
+      branchId: d.branchId ? String(d.branchId) : null,
+
+      supplierId: String(d.supplierId),
+      supplierName: d.supplierName,
+      status: d.status,
+      orderDate: d.orderDate,
+      expectedDate: d.expectedDate ?? null,
+      notes: d.notes ?? null,
+
+      totals: d.totals,
+      invoice: d.invoice,
+
+      items: (d.items ?? []).map((it: any) => ({
+        ingredientId: String(it.ingredientId),
+        ingredientName: it.ingredientName,
+        name_for_supplier: it.name_for_supplier ?? null,
+        qty: it.qty,
+        unit: it.unit,
+        approxUnitPrice: it.approxUnitPrice,
+        approxLineTotal: it.approxLineTotal,
+        realUnitPrice: it.realUnitPrice ?? null,
+        realLineTotal: it.realLineTotal ?? null,
+        receivedQty: it.receivedQty ?? 0,
+        note: it.note ?? null,
+      })),
+
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    };
+  }
+
+  async create(dto: CreatePurchaseOrderDto & { branchId: string }) {
+    const branchObjId = this.oidOrThrow(dto.branchId, 'branchId');
+
+    const supplierObjId = this.oidOrThrow(dto.supplierId, 'supplierId');
+
+    // ✅ supplier del branch
+    const supplier: any = await this.supplierModel
+      .findOne({ _id: supplierObjId, branchId: branchObjId } as any)
+      .lean();
+
     if (!supplier) throw new NotFoundException('Supplier not found');
 
     const itemsInput = dto.items ?? [];
-    const ingredientIds = itemsInput.map((x) => x.ingredientId);
-    const ings = ingredientIds.length
-      ? await this.ingredientModel.find({ _id: { $in: ingredientIds } }).lean()
+    if (!Array.isArray(itemsInput) || itemsInput.length === 0) {
+      throw new BadRequestException('items[] is required');
+    }
+
+    const ingredientObjIds = itemsInput.map((x) =>
+      this.oidOrThrow(x.ingredientId, 'ingredientId'),
+    );
+
+    // ✅ ingredientes del branch
+    const ings: any[] = ingredientObjIds.length
+      ? await this.ingredientModel
+          .find({ _id: { $in: ingredientObjIds }, branchId: branchObjId } as any)
+          .lean()
       : [];
 
-    const ingMap = new Map<string, any>(
-      ings.map((i: any) => [String(i._id), i]),
-    );
+    const ingMap = new Map<string, any>(ings.map((i: any) => [String(i._id), i]));
 
     const items = itemsInput.map((it) => {
       const ing = ingMap.get(String(it.ingredientId));
       if (!ing)
         throw new BadRequestException(
-          `Ingredient not found: ${it.ingredientId}`,
+          `Ingredient not found in branch: ${it.ingredientId}`,
         );
 
+      const qty = num(it.qty);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new BadRequestException(
+          `qty must be > 0 for ingredient ${String(it.ingredientId)}`,
+        );
+      }
+
       const approxUnitPrice =
-        it.approxUnitPrice != null
-          ? num(it.approxUnitPrice)
-          : num(ing?.cost?.lastCost);
+        it.approxUnitPrice != null ? num(it.approxUnitPrice) : num(ing?.cost?.lastCost);
+
+      const unit = (it.unit ?? ing.baseUnit ?? Unit.UNIT) as Unit;
 
       return {
         ingredientId: new Types.ObjectId(it.ingredientId),
         ingredientName: ing.displayName || ing.name,
         name_for_supplier: ing.name_for_supplier ?? null,
-        qty: num(it.qty),
-        unit: it.unit ?? ing.baseUnit,
+        qty,
+        unit,
         approxUnitPrice,
         approxLineTotal: 0,
         realUnitPrice: null,
@@ -113,24 +187,29 @@ export class PurchaseOrdersService {
     const approxTotal = this.calcApprox(items);
 
     const doc = await this.poModel.create({
-      supplierId: new Types.ObjectId(dto.supplierId),
+      branchId: branchObjId, // ✅
+      supplierId: supplierObjId,
       supplierName: supplier.name,
       status: PurchaseOrderStatus.DRAFT,
       items,
       totals: { approxTotal, realTotal: null, currency: 'ARS' },
       notes: dto.notes ?? null,
-    });
+    } as any);
 
     return this.toResponse(doc);
   }
 
   async findAll(params: {
+    branchId: string;
     supplierId?: string;
     status?: PurchaseOrderStatus;
     limit?: number;
   }) {
-    const q: any = { deletedAt: null };
-    if (params.supplierId) q.supplierId = new Types.ObjectId(params.supplierId);
+    const branchObjId = this.oidOrThrow(params.branchId, 'branchId');
+
+    const q: any = { branchId: branchObjId, deletedAt: null };
+
+    if (params.supplierId) q.supplierId = this.oidOrThrow(params.supplierId, 'supplierId');
     if (params.status) q.status = params.status;
 
     const limit = Math.min(Math.max(num(params.limit) || 50, 1), 200);
@@ -140,22 +219,34 @@ export class PurchaseOrdersService {
       .sort({ orderDate: -1 })
       .limit(limit)
       .lean();
+
     return rows.map((d: any) => this.toResponse(d));
   }
 
-  async findOne(id: string) {
-    const doc = await this.poModel.findById(id).lean();
+  async findOne(branchId: string, id: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+
+    const doc = await this.poModel
+      .findOne({ _id: this.oidOrThrow(id, 'id'), branchId: branchObjId } as any)
+      .lean();
+
     if (!doc || doc.deletedAt)
       throw new NotFoundException('Purchase order not found');
+
     return this.toResponse(doc);
   }
 
-  async setStatus(id: string, status: PurchaseOrderStatus) {
-    const doc = await this.poModel.findById(id);
-    if (!doc || doc.deletedAt)
+  async setStatus(branchId: string, id: string, status: PurchaseOrderStatus) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+
+    const doc = await this.poModel.findOne({
+      _id: this.oidOrThrow(id, 'id'),
+      branchId: branchObjId,
+    } as any);
+
+    if (!doc || (doc as any).deletedAt)
       throw new NotFoundException('Purchase order not found');
 
-    // Reglas simples (podés endurecerlas)
     if (doc.status === PurchaseOrderStatus.CANCELLED) {
       throw new BadRequestException('Order is cancelled');
     }
@@ -165,9 +256,19 @@ export class PurchaseOrdersService {
     return this.toResponse(doc);
   }
 
-  async attachInvoice(id: string, dto: AttachInvoiceDto) {
-    const doc = await this.poModel.findById(id);
-    if (!doc || doc.deletedAt)
+  async attachInvoice(
+    branchId: string,
+    id: string,
+    dto: AttachInvoiceDto,
+  ) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+
+    const doc = await this.poModel.findOne({
+      _id: this.oidOrThrow(id, 'id'),
+      branchId: branchObjId,
+    } as any);
+
+    if (!doc || (doc as any).deletedAt)
       throw new NotFoundException('Purchase order not found');
 
     doc.invoice.imageUrl = dto.imageUrl ?? doc.invoice.imageUrl ?? null;
@@ -190,40 +291,12 @@ export class PurchaseOrdersService {
     return this.toResponse(doc);
   }
 
-  private toResponse(d: any) {
-    return {
-      id: String(d._id),
-      supplierId: String(d.supplierId),
-      supplierName: d.supplierName,
-      status: d.status,
-      orderDate: d.orderDate,
-      expectedDate: d.expectedDate ?? null,
-      notes: d.notes ?? null,
-      totals: d.totals,
-      invoice: d.invoice,
-      items: (d.items ?? []).map((it: any) => ({
-        ingredientId: String(it.ingredientId),
-        ingredientName: it.ingredientName,
-        name_for_supplier: it.name_for_supplier ?? null,
-        qty: it.qty,
-        unit: it.unit,
-        approxUnitPrice: it.approxUnitPrice,
-        approxLineTotal: it.approxLineTotal,
-        realUnitPrice: it.realUnitPrice ?? null,
-        realLineTotal: it.realLineTotal ?? null,
-        receivedQty: it.receivedQty ?? 0,
-        note: it.note ?? null,
-      })),
-      createdAt: d.createdAt,
-      updatedAt: d.updatedAt,
-    };
-  }
-
   async receive(
     id: string,
-    dto: ReceivePurchaseOrderDto & { userId?: string | null },
+    dto: ReceivePurchaseOrderDto & { userId?: string | null; branchId: string },
   ) {
     const MAX_RETRIES = 3;
+    const branchObjId = this.oidOrThrow(dto.branchId, 'branchId');
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const session = await this.poModel.db.startSession();
@@ -232,8 +305,11 @@ export class PurchaseOrdersService {
         let result: any;
 
         await session.withTransaction(async () => {
-          const doc = await this.poModel.findById(id).session(session);
-          if (!doc || doc.deletedAt)
+          const doc = await this.poModel
+            .findOne({ _id: this.oidOrThrow(id, 'id'), branchId: branchObjId } as any)
+            .session(session);
+
+          if (!doc || (doc as any).deletedAt)
             throw new NotFoundException('Purchase order not found');
 
           if (
@@ -247,7 +323,7 @@ export class PurchaseOrdersService {
           }
 
           const dateKey = todayKeyArgentina();
-          const userObjId = dto.userId ? new Types.ObjectId(dto.userId) : null;
+          const userObjId = dto.userId ? this.oidOrNull(dto.userId, 'userId') : null;
 
           const updMap = new Map(
             (dto.items ?? []).map((i) => [String(i.ingredientId), i]),
@@ -289,21 +365,20 @@ export class PurchaseOrdersService {
             }
 
             it.receivedQty = nextReceived;
-            if (upd.realUnitPrice != null)
-              it.realUnitPrice = num(upd.realUnitPrice);
+            if (upd.realUnitPrice != null) it.realUnitPrice = num(upd.realUnitPrice);
           }
 
           // 2) Aplicar stock (y movimiento) vía StockService en la misma txn
           for (const d of deltas) {
-            // (opcional) si querés actualizar costos del ingrediente acá:
+            // ✅ update costos del ingrediente (por branch)
             if (d.realUnitPrice != null) {
               const ing = await this.ingredientModel
-                .findById(d.ingredientId)
+                .findOne({ _id: d.ingredientId, branchId: branchObjId } as any)
                 .session(session);
 
               if (!ing) {
                 throw new BadRequestException(
-                  `Ingredient not found: ${String(d.ingredientId)}`,
+                  `Ingredient not found in branch: ${String(d.ingredientId)}`,
                 );
               }
 
@@ -313,9 +388,7 @@ export class PurchaseOrdersService {
               if (UPDATE_AVG_COST) {
                 const prevAvg = num((ing as any).cost?.avgCost);
                 (ing as any).cost.avgCost =
-                  prevAvg > 0
-                    ? (prevAvg + d.realUnitPrice) / 2
-                    : d.realUnitPrice;
+                  prevAvg > 0 ? (prevAvg + d.realUnitPrice) / 2 : d.realUnitPrice;
               }
 
               await ing.save({ session });
@@ -323,13 +396,14 @@ export class PurchaseOrdersService {
 
             await this.stockService.applyPurchaseReceiveTx({
               session,
+              branchId: branchObjId, // ✅
               dateKey,
               purchaseOrderId: doc._id,
               ingredientId: d.ingredientId,
               unit: d.unit,
               qty: d.deltaQty,
               note: `Recepción PO ${String(doc._id)} (${doc.supplierName})`,
-              createdByUserId: userObjId,
+              createdByUserId: userObjId as any,
             });
           }
 
@@ -345,8 +419,7 @@ export class PurchaseOrdersService {
           );
 
           if (allReceived) doc.status = PurchaseOrderStatus.RECEIVED;
-          else if (someReceived)
-            doc.status = PurchaseOrderStatus.RECEIVED_PARTIAL;
+          else if (someReceived) doc.status = PurchaseOrderStatus.RECEIVED_PARTIAL;
 
           await doc.save({ session });
 

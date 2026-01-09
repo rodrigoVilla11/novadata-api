@@ -32,35 +32,30 @@ export class PurchaseOrderItem {
   @Prop({ type: Types.ObjectId, ref: "Ingredient", required: true, index: true })
   ingredientId: Types.ObjectId;
 
-  // snapshots (para que quede “como se pidió”)
   @Prop({ type: String, trim: true, required: true })
   ingredientName: string;
 
   @Prop({ type: String, trim: true, default: null })
   name_for_supplier?: string | null;
 
-  // Cantidad pedida en baseUnit del ingrediente
   @Prop({ type: Number, required: true, min: 0 })
   qty: number;
 
   @Prop({ type: String, enum: Unit, required: true })
   unit: Unit;
 
-  // Estimado (cuando armás el pedido)
   @Prop({ type: Number, default: 0, min: 0 })
   approxUnitPrice: number;
 
   @Prop({ type: Number, default: 0, min: 0 })
   approxLineTotal: number;
 
-  // Real (cuando llega la factura)
   @Prop({ type: Number, default: null, min: 0 })
   realUnitPrice?: number | null;
 
   @Prop({ type: Number, default: null, min: 0 })
   realLineTotal?: number | null;
 
-  // Recibido (para parcial)
   @Prop({ type: Number, default: 0, min: 0 })
   receivedQty: number;
 
@@ -82,14 +77,22 @@ export class PurchaseOrderTotals {
 
 @Schema({ timestamps: true })
 export class PurchaseOrder {
+  // ✅ NUEVO: multi-branch
+  @Prop({ type: Types.ObjectId, ref: "Branch", required: true, index: true })
+  branchId: Types.ObjectId;
+
   @Prop({ type: Types.ObjectId, ref: "Supplier", required: true, index: true })
   supplierId: Types.ObjectId;
 
-  // snapshot
   @Prop({ type: String, trim: true, required: true })
   supplierName: string;
 
-  @Prop({ type: String, enum: PurchaseOrderStatus, default: PurchaseOrderStatus.DRAFT, index: true })
+  @Prop({
+    type: String,
+    enum: PurchaseOrderStatus,
+    default: PurchaseOrderStatus.DRAFT,
+    index: true,
+  })
   status: PurchaseOrderStatus;
 
   @Prop({ type: Date, default: () => new Date(), index: true })
@@ -116,5 +119,9 @@ export class PurchaseOrder {
 
 export const PurchaseOrderSchema = SchemaFactory.createForClass(PurchaseOrder);
 
-PurchaseOrderSchema.index({ supplierId: 1, orderDate: -1 });
-PurchaseOrderSchema.index({ status: 1, orderDate: -1 });
+// ✅ Índices: siempre con branchId adelante
+PurchaseOrderSchema.index({ branchId: 1, supplierId: 1, orderDate: -1 });
+PurchaseOrderSchema.index({ branchId: 1, status: 1, orderDate: -1 });
+
+// ✅ Listar activos (soft delete)
+PurchaseOrderSchema.index({ branchId: 1, deletedAt: 1, orderDate: -1 });
