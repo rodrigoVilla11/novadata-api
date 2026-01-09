@@ -1,20 +1,27 @@
-import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument } from 'mongoose';
+// weekly-message.schema.ts
+import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
+import { HydratedDocument } from "mongoose";
 
 export type WeeklyMessageDocument = HydratedDocument<WeeklyMessage>;
 
 export type WeeklyMessageType =
-  | 'avance'
-  | 'error'
-  | 'mejora'
-  | 'bloqueo'
-  | 'decision'
-  | 'otro';
+  | "avance"
+  | "error"
+  | "mejora"
+  | "bloqueo"
+  | "decision"
+  | "otro";
 
 @Schema({ timestamps: true })
 export class WeeklyMessage {
   @Prop({ required: true, unique: true, index: true, trim: true })
   id: string;
+
+  /**
+   * Branch (duplicado a propósito para queries rápidas)
+   */
+  @Prop({ required: true, index: true, trim: true })
+  branchId: string;
 
   @Prop({ required: true, index: true, trim: true })
   thread_id: string;
@@ -27,8 +34,8 @@ export class WeeklyMessage {
 
   @Prop({
     type: String,
-    enum: ['avance', 'error', 'mejora', 'bloqueo', 'decision', 'otro'],
-    default: 'otro',
+    enum: ["avance", "error", "mejora", "bloqueo", "decision", "otro"],
+    default: "otro",
     index: true,
   })
   type: WeeklyMessageType;
@@ -46,7 +53,12 @@ export class WeeklyMessage {
   updatedAt?: Date;
 }
 
-export const WeeklyMessageSchema = SchemaFactory.createForClass(WeeklyMessage);
+export const WeeklyMessageSchema =
+  SchemaFactory.createForClass(WeeklyMessage);
 
-WeeklyMessageSchema.index({ thread_id: 1, createdAt: 1 });
+/**
+ * Índices pensados para listados reales
+ */
+WeeklyMessageSchema.index({ branchId: 1, thread_id: 1, createdAt: 1 });
 WeeklyMessageSchema.index({ author_id: 1, createdAt: -1 });
+WeeklyMessageSchema.index({ branchId: 1, pinned: 1 });

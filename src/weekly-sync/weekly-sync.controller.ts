@@ -7,12 +7,20 @@ import {
   Query,
   Req,
   UseGuards,
+  BadRequestException,
 } from '@nestjs/common';
 import { WeeklySyncService } from './weekly-sync.service';
 import { CreateWeeklyMessageDto } from './dto/create-weekly-message.dto';
 import { CloseWeekDto } from './dto/close-week.dto';
 import { Roles } from 'src/auth/roles.decorator';
 import { JwtAuthGuard } from 'src/auth/jwt-auth.guard';
+
+function parseLimit(v: any, fallback: number, min = 1, max = 200) {
+  if (v == null || v === '') return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new BadRequestException('limit inválido');
+  return Math.min(Math.max(Math.trunc(n), min), max);
+}
 
 @Controller('weekly-sync')
 @UseGuards(JwtAuthGuard)
@@ -25,12 +33,27 @@ export class WeeklySyncController {
     return this.weeklySyncService.getOrCreateCurrentWeek(req.user);
   }
 
+  /**
+   * Útil para el front: trae thread actual + mensajes (paginado)
+   * GET /weekly-sync/current-with-messages?limit=50
+   */
+  @Get('current-with-messages')
+  async getCurrentWithMessages(@Req() req: any, @Query('limit') limit?: string) {
+    const thread = await this.weeklySyncService.getOrCreateCurrentWeek(req.user);
+    if (!thread) {
+      throw new BadRequestException('Could not create or retrieve current week');
+    }
+    const messages = await this.weeklySyncService.listMessages(req.user, thread.id, {
+      limit: parseLimit(limit, 50, 1, 200),
+      cursor: undefined,
+    });
+
+    return { thread, ...messages };
+  }
+
   @Get('weeks')
   async listWeeks(@Req() req: any, @Query('limit') limit?: string) {
-    return this.weeklySyncService.listWeeks(
-      req.user,
-      limit ? Number(limit) : 20,
-    );
+    return this.weeklySyncService.listWeeks(req.user, parseLimit(limit, 20, 1, 100));
   }
 
   @Get(':threadId/messages')
@@ -41,7 +64,7 @@ export class WeeklySyncController {
     @Query('cursor') cursor?: string,
   ) {
     return this.weeklySyncService.listMessages(req.user, threadId, {
-      limit: limit ? Number(limit) : 50,
+      limit: parseLimit(limit, 50, 1, 200),
       cursor,
     });
   }

@@ -23,6 +23,8 @@ import { User, UserDocument } from 'src/users/schemas/user.schema';
 type AuthUser = {
   id: string;
   roles?: string[];
+  branchId?: string | null;
+  email?: string | null;
 };
 
 function startOfWeekMonday(d: Date): Date {
@@ -48,6 +50,14 @@ function requireManagerOrAdmin(user: AuthUser) {
     throw new ForbiddenException('No tenés permisos para usar Weekly Sync.');
 }
 
+function requireBranchId(user: AuthUser): string {
+  const branchId = user?.branchId ?? null;
+  if (!branchId) {
+    throw new ForbiddenException('Tu usuario no tiene branchId asignado.');
+  }
+  return String(branchId);
+}
+
 @Injectable()
 export class WeeklySyncService {
   constructor(
@@ -60,17 +70,21 @@ export class WeeklySyncService {
 
   async getOrCreateCurrentWeek(user: AuthUser) {
     requireManagerOrAdmin(user);
+    const branchId = requireBranchId(user);
 
     const week_start = startOfWeekMonday(new Date());
     const week_end = addDays(week_start, 7); // lunes siguiente 00:00
 
-    // Busca por week_start (tenés índice unique)
-    let thread = await this.threadModel.findOne({ week_start }).lean();
+    // ✅ Multi-branch: buscar por branchId + week_start
+    let thread = await this.threadModel
+      .findOne({ branchId, week_start })
+      .lean();
 
     if (!thread) {
       try {
         const created = await this.threadModel.create({
           id: randomUUID(),
+          branchId,
           week_start,
           week_end,
           status: 'open',
@@ -84,8 +98,10 @@ export class WeeklySyncService {
         // Mensaje inicial plantilla (opcional pero recomendado)
         await this.messageModel.create({
           id: randomUUID(),
+          branchId,
           thread_id: thread.id,
           author_id: user.id,
+          author_email: user.email ?? null,
           type: 'otro',
           pinned: true,
           task_id: null,
@@ -99,8 +115,10 @@ export class WeeklySyncService {
             '📌 Acciones / responsables:\n',
         });
       } catch (e: any) {
-        // carrera: dos usuarios entran a la vez → unique week_start
-        thread = await this.threadModel.findOne({ week_start }).lean();
+        // carrera: dos usuarios entran a la vez → unique (branchId, week_start)
+        thread = await this.threadModel
+          .findOne({ branchId, week_start })
+          .lean();
       }
     }
 
@@ -109,9 +127,10 @@ export class WeeklySyncService {
 
   async listWeeks(user: AuthUser, limit = 20) {
     requireManagerOrAdmin(user);
+    const branchId = requireBranchId(user);
 
     return this.threadModel
-      .find({})
+      .find({ branchId })
       .sort({ week_start: -1 })
       .limit(Math.min(Math.max(limit, 1), 100))
       .lean();
@@ -123,6 +142,7 @@ export class WeeklySyncService {
     opts?: { limit?: number; cursor?: string },
   ) {
     requireManagerOrAdmin(user);
+    const branchId = requireBranchId(user);
 
     const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
     const cursor = opts?.cursor; // createdAt ISO string
@@ -130,7 +150,13 @@ export class WeeklySyncService {
     const thread = await this.threadModel.findOne({ id: threadId }).lean();
     if (!thread) throw new NotFoundException('Semana no encontrada.');
 
-    const query: any = { thread_id: threadId };
+    // ✅ Aislamiento por sucursal
+    if (String((thread as any).branchId) !== branchId) {
+      throw new ForbiddenException('No tenés acceso a esta semana.');
+    }
+
+    const query: any = { branchId, thread_id: threadId };
+
     if (cursor) {
       const cursorDate = new Date(cursor);
       if (!isFinite(cursorDate.getTime()))
@@ -143,9 +169,6 @@ export class WeeklySyncService {
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
-    const authorIds = Array.from(
-      new Set(items.map((m: any) => m.author_id).filter(Boolean)),
-    );
 
     const nextCursor = items.length
       ? items[items.length - 1].createdAt?.toISOString?.()
@@ -160,44 +183,60 @@ export class WeeklySyncService {
     dto: CreateWeeklyMessageDto,
   ) {
     requireManagerOrAdmin(user);
+    const branchId = requireBranchId(user);
 
     const thread = await this.threadModel.findOne({ id: threadId }).lean();
     if (!thread) throw new NotFoundException('Semana no encontrada.');
-    if (thread.status === 'closed')
+
+    // ✅ Aislamiento por sucursal
+    if (String((thread as any).branchId) !== branchId) {
+      throw new ForbiddenException('No tenés acceso a esta semana.');
+    }
+
+    if ((thread as any).status === 'closed')
       throw new BadRequestException('La semana está cerrada.');
 
     const type: WeeklyMessageType = (dto.type ?? 'otro') as WeeklyMessageType;
 
     const created = await this.messageModel.create({
       id: randomUUID(),
+      branchId,
       thread_id: threadId,
       author_id: user.id,
-      author_email: (user as any).email || null,
+      author_email: user.email ?? null,
       type,
       text: dto.text,
       pinned: dto.pinned ?? false,
       task_id: dto.task_id ?? null,
     });
 
+    // Si querés garantizar email aunque no venga en req.user:
     const author = await this.userModel
       .findOne({ id: user.id }, { email: 1 })
       .lean();
 
     return {
       ...created.toObject(),
-      author_email: author?.email || null,
+      author_email: author?.email || user.email || null,
     };
   }
 
   async closeWeek(user: AuthUser, threadId: string, dto: CloseWeekDto) {
     requireManagerOrAdmin(user);
+    const branchId = requireBranchId(user);
 
     const thread = await this.threadModel.findOne({ id: threadId });
     if (!thread) throw new NotFoundException('Semana no encontrada.');
-    if (thread.status === 'closed') return thread.toObject();
 
-    thread.status = 'closed';
-    if (typeof dto.summary === 'string') thread.summary = dto.summary;
+    // ✅ Aislamiento por sucursal
+    if (String((thread as any).branchId) !== branchId) {
+      throw new ForbiddenException('No tenés acceso a esta semana.');
+    }
+
+    if ((thread as any).status === 'closed') return thread.toObject();
+
+    (thread as any).status = 'closed';
+    if (typeof dto.summary === 'string') (thread as any).summary = dto.summary;
 
     await thread.save();
     return thread.toObject();
