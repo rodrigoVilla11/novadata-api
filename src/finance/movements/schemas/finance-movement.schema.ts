@@ -1,32 +1,43 @@
-import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
+import { Document, Types } from "mongoose";
 
 export type FinanceMovementDocument = FinanceMovement & Document;
 
 export enum FinanceMovementType {
-  INCOME = 'INCOME', // legacy
-  EXPENSE = 'EXPENSE', // legacy
-  TRANSFER = 'TRANSFER', // legacy (ahora se materializa con 2 asientos)
+  INCOME = "INCOME", // legacy
+  EXPENSE = "EXPENSE", // legacy
+  TRANSFER = "TRANSFER", // legacy (ahora se materializa con 2 asientos)
 }
 
 export enum FinanceMovementDirection {
-  IN = 'IN',
-  OUT = 'OUT',
-  TRANSFER = 'TRANSFER',
-  ADJUSTMENT = 'ADJUSTMENT',
+  IN = "IN",
+  OUT = "OUT",
+  TRANSFER = "TRANSFER",
+  ADJUSTMENT = "ADJUSTMENT",
 }
 
-export type FinanceMovementStatus = 'POSTED' | 'VOID';
+export type FinanceMovementStatus = "POSTED" | "VOID";
 
 export type FinanceMovementSource =
-  | 'MANUAL'
-  | 'CASH'
-  | 'SALE'
-  | 'SYSTEM'
-  | 'ADJUSTMENT';
+  | "MANUAL"
+  | "CASH"
+  | "SALE"
+  | "SYSTEM"
+  | "ADJUSTMENT";
 
 @Schema({ timestamps: true })
 export class FinanceMovement {
+  /* ======================
+   * Multi-branch
+   * ====================== */
+  @Prop({
+    type: Types.ObjectId,
+    ref: "Branch",
+    required: true,
+    index: true,
+  })
+  branchId!: Types.ObjectId;
+
   @Prop({ required: true, index: true })
   dateKey!: string; // YYYY-MM-DD
 
@@ -68,10 +79,10 @@ export class FinanceMovement {
   @Prop({ type: Types.ObjectId, required: true, index: true })
   createdByUserId!: Types.ObjectId;
 
-  @Prop({ type: String, default: 'POSTED', index: true })
+  @Prop({ type: String, default: "POSTED", index: true })
   status!: FinanceMovementStatus;
 
-  @Prop({ type: String, default: 'MANUAL', index: true })
+  @Prop({ type: String, default: "MANUAL", index: true })
   source!: FinanceMovementSource;
 
   @Prop({ type: String, default: null, index: true })
@@ -94,17 +105,46 @@ export class FinanceMovement {
   updatedAt?: Date;
 }
 
-export const FinanceMovementSchema =
-  SchemaFactory.createForClass(FinanceMovement);
+export const FinanceMovementSchema = SchemaFactory.createForClass(FinanceMovement);
+
+/* ======================
+ * Índices (multi-branch)
+ * ====================== */
 
 FinanceMovementSchema.index({
+  branchId: 1,
   dateKey: 1,
   direction: 1,
   accountId: 1,
   status: 1,
 });
-FinanceMovementSchema.index({ dateKey: 1, categoryId: 1, status: 1 });
-FinanceMovementSchema.index({ createdByUserId: 1, dateKey: 1 });
-FinanceMovementSchema.index({ transferGroupId: 1, dateKey: 1 });
-FinanceMovementSchema.index({ source: 1, refType: 1, refId: 1 });
-FinanceMovementSchema.index({ cashDayId: 1, createdAt: -1 });
+
+FinanceMovementSchema.index({
+  branchId: 1,
+  dateKey: 1,
+  categoryId: 1,
+  status: 1,
+});
+
+FinanceMovementSchema.index({
+  branchId: 1,
+  createdByUserId: 1,
+  dateKey: 1,
+});
+
+FinanceMovementSchema.index({
+  branchId: 1,
+  transferGroupId: 1,
+  dateKey: 1,
+});
+
+/* ✅ FIX: antes estaba source + refType + refId (no existen) */
+FinanceMovementSchema.index({
+  branchId: 1,
+  source: 1,
+  sourceRef: 1,
+});
+
+/* ❌ SACAR si no existe cashDayId en el schema
+FinanceMovementSchema.index({ branchId: 1, cashDayId: 1, createdAt: -1 });
+*/

@@ -14,6 +14,13 @@ function normCode(code: string) {
   return c.replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
 }
 
+function ensureBranchObjectId(branchId: string) {
+  if (!branchId || !Types.ObjectId.isValid(branchId)) {
+    throw new BadRequestException("branchId inválido");
+  }
+  return new Types.ObjectId(branchId);
+}
+
 function parseObjectIdOrNull(v?: string | null) {
   if (v === undefined) return undefined; // means "no filter / no change"
   if (v === null || v === "" || v === "null") return null;
@@ -28,7 +35,29 @@ export class FinanceCategoriesService {
     private readonly categoryModel: Model<FinanceCategoryDocument>,
   ) {}
 
-  async create(userId: string, dto: CreateFinanceCategoryDto) {
+  private async assertParentInSameBranchOrThrow(params: {
+    branchId: Types.ObjectId;
+    parentId: Types.ObjectId;
+  }) {
+    const parent = await this.categoryModel
+      .findOne({
+        _id: params.parentId,
+        branchId: params.branchId,
+        deletedAt: null,
+      })
+      .select({ _id: 1 })
+      .lean();
+
+    if (!parent) {
+      throw new BadRequestException("parentId no existe en esta sucursal (o está borrado)");
+    }
+  }
+
+  async create(params: { userId: string; branchId: string; dto: CreateFinanceCategoryDto }) {
+    const { userId, branchId, dto } = params;
+
+    const branchObjectId = ensureBranchObjectId(branchId);
+
     const name = (dto.name || "").trim();
     if (!name) throw new BadRequestException("name is required");
 
@@ -37,15 +66,21 @@ export class FinanceCategoriesService {
 
     const parentId = parseObjectIdOrNull(dto.parentId ?? null);
 
+    // ✅ validar parent dentro de la misma branch
+    if (parentId instanceof Types.ObjectId) {
+      await this.assertParentInSameBranchOrThrow({ branchId: branchObjectId, parentId });
+    }
+
     const createdByUserId = Types.ObjectId.isValid(userId) ? new Types.ObjectId(userId) : null;
 
     try {
       const created = await this.categoryModel.create({
+        branchId: branchObjectId,
         code,
         name,
         type: dto.type,
         direction: dto.direction,
-        parentId,
+        parentId: parentId ?? null,
         order: dto.order ?? 0,
         isActive: true,
         affectsProfit: dto.affectsProfit ?? true,
@@ -64,6 +99,7 @@ export class FinanceCategoriesService {
   }
 
   async findAll(params: {
+    branchId: string;
     type?: FinanceCategoryType;
     active?: boolean;
     parentId?: string | null;
@@ -71,6 +107,8 @@ export class FinanceCategoriesService {
     includeDeleted?: boolean;
   }) {
     const filter: any = {};
+    filter.branchId = ensureBranchObjectId(params.branchId);
+
     if (!params.includeDeleted) filter.deletedAt = null;
     if (params.type) filter.type = params.type;
     if (typeof params.active === "boolean") filter.isActive = params.active;
@@ -88,18 +126,39 @@ export class FinanceCategoriesService {
       ];
     }
 
-    const rows = await this.categoryModel.find(filter).sort({ order: 1, name: 1 }).lean();
+    const rows = await this.categoryModel
+      .find(filter)
+      .collation({ locale: "en", strength: 2 })
+      .sort({ order: 1, name: 1 })
+      .lean();
+
     return rows.map((r) => this.toDTO(r));
   }
 
-  async findOne(id: string) {
-    const row = await this.categoryModel.findById(id).lean();
+  async findOne(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.categoryModel
+      .findOne({
+        _id: id,
+        branchId: ensureBranchObjectId(branchId),
+      })
+      .lean();
+
     if (!row || row.deletedAt) throw new NotFoundException("Categoría no encontrada");
     return this.toDTO(row);
   }
 
-  async update(id: string, dto: UpdateFinanceCategoryDto) {
-    const row = await this.categoryModel.findById(id);
+  async update(params: { branchId: string; id: string; dto: UpdateFinanceCategoryDto }) {
+    const { branchId, id, dto } = params;
+
+    const branchObjectId = ensureBranchObjectId(branchId);
+
+    const row = await this.categoryModel.findOne({
+      _id: id,
+      branchId: branchObjectId,
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Categoría no encontrada");
 
     if (dto.code !== undefined) {
@@ -117,7 +176,23 @@ export class FinanceCategoriesService {
     if (dto.type !== undefined) row.type = dto.type;
     if (dto.direction !== undefined) row.direction = dto.direction;
 
-    if (dto.parentId !== undefined) row.parentId = parseObjectIdOrNull(dto.parentId) as any;
+    if (dto.parentId !== undefined) {
+      const nextParentId = parseObjectIdOrNull(dto.parentId) as any;
+
+      // ✅ validar parent dentro de la misma branch
+      if (nextParentId instanceof Types.ObjectId) {
+        // opcional: evitar que sea su propio parent
+        if (String(nextParentId) === String(row._id)) {
+          throw new BadRequestException("parentId no puede ser la misma categoría");
+        }
+        await this.assertParentInSameBranchOrThrow({
+          branchId: branchObjectId,
+          parentId: nextParentId,
+        });
+      }
+
+      row.parentId = nextParentId;
+    }
 
     if (dto.order !== undefined) row.order = dto.order;
     if (dto.isActive !== undefined) row.isActive = dto.isActive;
@@ -136,24 +211,42 @@ export class FinanceCategoriesService {
     return this.toDTO(row.toObject());
   }
 
-  async archive(id: string) {
-    const row = await this.categoryModel.findById(id);
+  async archive(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.categoryModel.findOne({
+      _id: id,
+      branchId: ensureBranchObjectId(branchId),
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Categoría no encontrada");
     row.isActive = false;
     await row.save();
     return { ok: true };
   }
 
-  async restore(id: string) {
-    const row = await this.categoryModel.findById(id);
+  async restore(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.categoryModel.findOne({
+      _id: id,
+      branchId: ensureBranchObjectId(branchId),
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Categoría no encontrada");
     row.isActive = true;
     await row.save();
     return { ok: true };
   }
 
-  async softDelete(id: string) {
-    const row = await this.categoryModel.findById(id);
+  async softDelete(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.categoryModel.findOne({
+      _id: id,
+      branchId: ensureBranchObjectId(branchId),
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Categoría no encontrada");
     row.isActive = false;
     row.deletedAt = new Date();
@@ -164,6 +257,7 @@ export class FinanceCategoriesService {
   private toDTO(row: any) {
     return {
       id: String(row._id),
+      branchId: row.branchId ? String(row.branchId) : null,
       code: row.code,
       name: row.name,
       type: row.type,

@@ -12,13 +12,25 @@ export class ClosingBalanceRow {
   balance!: number;
 }
 
-export const ClosingBalanceRowSchema = SchemaFactory.createForClass(ClosingBalanceRow);
+export const ClosingBalanceRowSchema =
+  SchemaFactory.createForClass(ClosingBalanceRow);
 
 export type ClosingStatus = "OPEN" | "SUBMITTED" | "LOCKED";
 
 @Schema({ timestamps: true })
 export class FinanceDayClosing {
-  @Prop({ type: String, required: true, index: true, unique: true })
+  /* ======================
+   * Multi-branch
+   * ====================== */
+  @Prop({
+    type: Types.ObjectId,
+    ref: "Branch",
+    required: true,
+    index: true,
+  })
+  branchId!: Types.ObjectId;
+
+  @Prop({ type: String, required: true, index: true })
   dateKey!: string; // YYYY-MM-DD
 
   @Prop({ type: String, default: "OPEN", index: true })
@@ -55,7 +67,23 @@ export class FinanceDayClosing {
   lockedAt?: Date | null;
 }
 
-export const FinanceDayClosingSchema = SchemaFactory.createForClass(FinanceDayClosing);
+export const FinanceDayClosingSchema =
+  SchemaFactory.createForClass(FinanceDayClosing);
 
-FinanceDayClosingSchema.index({ dateKey: 1 }, { unique: true });
-FinanceDayClosingSchema.index({ status: 1, dateKey: -1 });
+/* ======================
+ * Índices (multi-branch)
+ * ====================== */
+
+// ✅ único por sucursal + día
+FinanceDayClosingSchema.index(
+  { branchId: 1, dateKey: 1 },
+  { unique: true },
+);
+
+// listados
+FinanceDayClosingSchema.index({ branchId: 1, status: 1, dateKey: -1 });
+
+// opcional: búsquedas/joins por cuentas dentro de arrays
+FinanceDayClosingSchema.index({ branchId: 1, dateKey: 1, "declaredBalances.accountId": 1 });
+FinanceDayClosingSchema.index({ branchId: 1, dateKey: 1, "computedBalances.accountId": 1 });
+FinanceDayClosingSchema.index({ branchId: 1, dateKey: 1, "diffBalances.accountId": 1 });

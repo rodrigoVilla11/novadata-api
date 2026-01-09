@@ -36,6 +36,13 @@ function escRegex(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function ensureBranchObjectId(branchId: string) {
+  if (!branchId || !Types.ObjectId.isValid(branchId)) {
+    throw new BadRequestException("branchId inválido");
+  }
+  return new Types.ObjectId(branchId);
+}
+
 @Injectable()
 export class FinanceMovementsService {
   constructor(
@@ -62,12 +69,20 @@ export class FinanceMovementsService {
     return Array.isArray(roles) && roles.includes("ADMIN");
   }
 
-  private async assertDayNotLocked(dateKey: string, roles?: string[]) {
-    const closing = await this.closingModel.findOne({ dateKey }).lean();
+  private async assertDayNotLocked(params: {
+    branchId: Types.ObjectId;
+    dateKey: string;
+    roles?: string[];
+  }) {
+    const closing = await this.closingModel
+      .findOne({ branchId: params.branchId, dateKey: params.dateKey })
+      .lean();
+
     if (!closing) return;
-    if (closing.status === "LOCKED" && !this.isAdmin(roles)) {
+
+    if (closing.status === "LOCKED" && !this.isAdmin(params.roles)) {
       throw new BadRequestException(
-        `El día ${dateKey} está CERRADO (LOCKED). Solo ADMIN puede modificar movimientos.`,
+        `El día ${params.dateKey} está CERRADO (LOCKED). Solo ADMIN puede modificar movimientos.`,
       );
     }
   }
@@ -121,21 +136,35 @@ export class FinanceMovementsService {
     }
   }
 
-  private legacyTypeFromDirection(direction: FinanceMovementDirection): FinanceMovementType {
-    if (direction === FinanceMovementDirection.IN) return FinanceMovementType.INCOME;
-    if (direction === FinanceMovementDirection.OUT) return FinanceMovementType.EXPENSE;
-    if (direction === FinanceMovementDirection.TRANSFER) return FinanceMovementType.TRANSFER;
+  private legacyTypeFromDirection(
+    direction: FinanceMovementDirection,
+  ): FinanceMovementType {
+    if (direction === FinanceMovementDirection.IN)
+      return FinanceMovementType.INCOME;
+    if (direction === FinanceMovementDirection.OUT)
+      return FinanceMovementType.EXPENSE;
+    if (direction === FinanceMovementDirection.TRANSFER)
+      return FinanceMovementType.TRANSFER;
     // ADJUSTMENT: mantenemos EXPENSE como “legacy” (solo compatibilidad)
     return FinanceMovementType.EXPENSE;
   }
 
   private async getSnapshots(params: {
+    branchId: string;
     accountId: Types.ObjectId;
     categoryId?: Types.ObjectId | null;
   }) {
-    const acc = await this.accountsService.findOne(String(params.accountId));
+    // ✅ valida también que pertenezcan a la branch (porque los services ya filtran por branch)
+    const acc = await this.accountsService.findOne({
+      branchId: params.branchId,
+      id: String(params.accountId),
+    });
+
     const cat = params.categoryId
-      ? await this.categoriesService.findOne(String(params.categoryId))
+      ? await this.categoriesService.findOne({
+          branchId: params.branchId,
+          id: String(params.categoryId),
+        })
       : null;
 
     return {
@@ -149,7 +178,15 @@ export class FinanceMovementsService {
   // -----------------------------
   // Create
   // -----------------------------
-  async create(userId: string, roles: string[], dto: CreateFinanceMovementDto) {
+  async create(params: {
+    branchId: string;
+    userId: string;
+    roles: string[];
+    dto: CreateFinanceMovementDto;
+  }) {
+    const { branchId, userId, roles, dto } = params;
+    const branchObjectId = ensureBranchObjectId(branchId);
+
     this.validateMovementInput({
       dateKey: dto.dateKey,
       direction: dto.direction,
@@ -159,7 +196,7 @@ export class FinanceMovementsService {
       adjustmentSign: (dto as any).adjustmentSign,
     });
 
-    await this.assertDayNotLocked(dto.dateKey, roles);
+    await this.assertDayNotLocked({ branchId: branchObjectId, dateKey: dto.dateKey, roles });
 
     const accountId = this.oid(dto.accountId, "accountId");
     const toAccountId =
@@ -173,16 +210,23 @@ export class FinanceMovementsService {
     const createdByUserId = this.oid(userId, "userId");
     const source: FinanceMovementSource = (dto.source ?? "MANUAL") as any;
 
-    // 1) No TRANSFER: un asiento
+    // ✅ validar existencia y branch de account/category/toAccount usando snapshots (si no existen, los services tiran NotFound)
+    // (esto también “pincha” rápido si pasaron un id de otra branch)
     if (dto.direction !== FinanceMovementDirection.TRANSFER) {
-      const snaps = await this.getSnapshots({ accountId, categoryId });
+      const snaps = await this.getSnapshots({ branchId, accountId, categoryId });
 
       const created = await this.movementModel.create({
+        branchId: branchObjectId,
+
         dateKey: dto.dateKey,
         type: this.legacyTypeFromDirection(dto.direction),
         direction: dto.direction,
         amount: dto.amount,
-        adjustmentSign: dto.direction === FinanceMovementDirection.ADJUSTMENT ? ((dto as any).adjustmentSign ?? 1) : 1,
+        adjustmentSign:
+          dto.direction === FinanceMovementDirection.ADJUSTMENT
+            ? ((dto as any).adjustmentSign ?? 1)
+            : 1,
+
         accountId,
         toAccountId: null,
         transferGroupId: null,
@@ -190,9 +234,11 @@ export class FinanceMovementsService {
         providerId,
         notes: dto.notes ?? null,
         createdByUserId,
+
         status: "POSTED" as FinanceMovementStatus,
         source,
         sourceRef: dto.sourceRef ?? null,
+
         ...snaps,
       });
 
@@ -200,16 +246,20 @@ export class FinanceMovementsService {
     }
 
     // 2) TRANSFER: dos asientos linkeados
-    if (!toAccountId) throw new BadRequestException("toAccountId requerido para TRANSFER");
+    if (!toAccountId) {
+      throw new BadRequestException("toAccountId requerido para TRANSFER");
+    }
+
+    // validar cuentas en la misma branch
+    const fromAcc = await this.accountsService.findOne({ branchId, id: String(accountId) });
+    const toAcc = await this.accountsService.findOne({ branchId, id: String(toAccountId) });
 
     const transferGroupId = new Types.ObjectId();
 
-    // snapshots por cuenta
-    const fromAcc = await this.accountsService.findOne(String(accountId));
-    const toAcc = await this.accountsService.findOne(String(toAccountId));
-
     const docs = await this.movementModel.create([
       {
+        branchId: branchObjectId,
+
         dateKey: dto.dateKey,
         type: FinanceMovementType.TRANSFER,
         direction: FinanceMovementDirection.OUT,
@@ -231,13 +281,15 @@ export class FinanceMovementsService {
         categoryCodeSnapshot: null,
       },
       {
+        branchId: branchObjectId,
+
         dateKey: dto.dateKey,
         type: FinanceMovementType.TRANSFER,
         direction: FinanceMovementDirection.IN,
         amount: dto.amount,
         adjustmentSign: 1,
-        accountId: toAccountId,     // 👈 destino como cuenta del asiento
-        toAccountId: accountId,     // opcional: para UI / trazabilidad
+        accountId: toAccountId, // 👈 destino como cuenta del asiento
+        toAccountId: accountId, // opcional: para UI / trazabilidad
         transferGroupId,
         categoryId: null,
         providerId: null,
@@ -253,14 +305,23 @@ export class FinanceMovementsService {
       },
     ]);
 
-    // Devolvemos una vista “compacta” (una transferencia)
     const outRow = docs[0];
+
     return this.toTransferDTO({
+      branchId,
       transferGroupId,
       dateKey: dto.dateKey,
       amount: dto.amount,
-      from: { id: String(accountId), name: fromAcc?.name ?? null, code: (fromAcc as any)?.code ?? null },
-      to: { id: String(toAccountId), name: toAcc?.name ?? null, code: (toAcc as any)?.code ?? null },
+      from: {
+        id: String(accountId),
+        name: fromAcc?.name ?? null,
+        code: (fromAcc as any)?.code ?? null,
+      },
+      to: {
+        id: String(toAccountId),
+        name: toAcc?.name ?? null,
+        code: (toAcc as any)?.code ?? null,
+      },
       notes: dto.notes ?? null,
       status: "POSTED",
       createdByUserId: String(createdByUserId),
@@ -275,6 +336,8 @@ export class FinanceMovementsService {
   // List (sin duplicar transferencias)
   // -----------------------------
   async findAll(params: {
+    branchId: string;
+
     from?: string;
     to?: string;
     direction?: FinanceMovementDirection;
@@ -287,7 +350,9 @@ export class FinanceMovementsService {
     includeVoids?: boolean;
     status?: "ALL" | "POSTED" | "VOID";
   }) {
-    const filter: any = {};
+    const branchObjectId = ensureBranchObjectId(params.branchId);
+
+    const filter: any = { branchId: branchObjectId };
 
     if (params.status && params.status !== "ALL") {
       filter.status = params.status;
@@ -310,17 +375,19 @@ export class FinanceMovementsService {
     if (params.q?.trim()) {
       const qq = params.q.trim();
       const r = { $regex: escRegex(qq), $options: "i" };
-      filter.$or = [{ notes: r }, { accountNameSnapshot: r }, { categoryNameSnapshot: r }, { accountCodeSnapshot: r }, { categoryCodeSnapshot: r }];
+      filter.$or = [
+        { notes: r },
+        { accountNameSnapshot: r },
+        { categoryNameSnapshot: r },
+        { accountCodeSnapshot: r },
+        { categoryCodeSnapshot: r },
+      ];
     }
 
     const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
     const page = Math.max(params.page ?? 1, 1);
     const skip = (page - 1) * limit;
 
-    // strategy:
-    // - Traemos docs del page
-    // - Compactamos TRANSFER por transferGroupId (usando OUT como representativo)
-    // Esto evita duplicados sin meternos en aggregation complejo.
     const items = await this.movementModel
       .find(filter)
       .sort({ dateKey: -1, createdAt: -1 })
@@ -328,11 +395,8 @@ export class FinanceMovementsService {
       .limit(limit)
       .lean();
 
-    // total: contar documentos sin compactar (lo dejamos simple por ahora)
-    // Si querés total "compactado", lo hacemos con aggregation.
     const total = await this.movementModel.countDocuments(filter);
 
-    // Compactación: para transferencias, quedarnos con el OUT por transferGroupId
     const seenTransfer = new Set<string>();
     const normalized: any[] = [];
 
@@ -340,21 +404,34 @@ export class FinanceMovementsService {
       if (it.type === "TRANSFER" && it.transferGroupId) {
         const gid = String(it.transferGroupId);
         if (seenTransfer.has(gid)) continue;
-        if (it.direction !== "OUT") continue; // elegimos OUT como “representante”
+        if (it.direction !== "OUT") continue;
         seenTransfer.add(gid);
 
-        // intentamos buscar el IN dentro del mismo page (si está)
         const inRow = items.find(
           (x) => String(x.transferGroupId) === gid && x.direction === "IN",
         );
 
         normalized.push(
           this.toTransferDTO({
+            branchId: String(it.branchId),
+
             transferGroupId: it.transferGroupId,
             dateKey: it.dateKey,
             amount: Number(it.amount ?? 0),
-            from: { id: String(it.accountId), name: it.accountNameSnapshot ?? null, code: it.accountCodeSnapshot ?? null },
-            to: { id: inRow ? String(inRow.accountId) : (it.toAccountId ? String(it.toAccountId) : null), name: inRow?.accountNameSnapshot ?? null, code: inRow?.accountCodeSnapshot ?? null },
+            from: {
+              id: String(it.accountId),
+              name: it.accountNameSnapshot ?? null,
+              code: it.accountCodeSnapshot ?? null,
+            },
+            to: {
+              id: inRow
+                ? String(inRow.accountId)
+                : it.toAccountId
+                  ? String(it.toAccountId)
+                  : null,
+              name: inRow?.accountNameSnapshot ?? null,
+              code: inRow?.accountCodeSnapshot ?? null,
+            },
             notes: it.notes ?? null,
             status: it.status ?? "POSTED",
             createdByUserId: it.createdByUserId ? String(it.createdByUserId) : null,
@@ -375,10 +452,16 @@ export class FinanceMovementsService {
   // -----------------------------
   // FindOne
   // -----------------------------
-  async findOne(id: string) {
-    if (!Types.ObjectId.isValid(id))
+  async findOne(params: { branchId: string; id: string }) {
+    const branchObjectId = ensureBranchObjectId(params.branchId);
+
+    if (!Types.ObjectId.isValid(params.id))
       throw new BadRequestException("id inválido");
-    const row = await this.movementModel.findById(id).lean();
+
+    const row = await this.movementModel
+      .findOne({ _id: params.id, branchId: branchObjectId })
+      .lean();
+
     if (!row) throw new NotFoundException("Movimiento no encontrado");
     return this.toDTO(row);
   }
@@ -386,72 +469,96 @@ export class FinanceMovementsService {
   // -----------------------------
   // Update
   // -----------------------------
-  async update(id: string, roles: string[], dto: UpdateFinanceMovementDto) {
-    if (!Types.ObjectId.isValid(id))
+  async update(params: {
+    branchId: string;
+    id: string;
+    roles: string[];
+    dto: UpdateFinanceMovementDto;
+  }) {
+    const branchObjectId = ensureBranchObjectId(params.branchId);
+
+    if (!Types.ObjectId.isValid(params.id))
       throw new BadRequestException("id inválido");
 
-    const row = await this.movementModel.findById(id);
+    const row = await this.movementModel.findOne({
+      _id: params.id,
+      branchId: branchObjectId,
+    });
+
     if (!row) throw new NotFoundException("Movimiento no encontrado");
 
     // LOCKED
-    const nextDateKey = dto.dateKey ?? row.dateKey;
-    await this.assertDayNotLocked(row.dateKey, roles);
-    await this.assertDayNotLocked(nextDateKey, roles);
+    const nextDateKey = params.dto.dateKey ?? row.dateKey;
+
+    await this.assertDayNotLocked({ branchId: branchObjectId, dateKey: row.dateKey, roles: params.roles });
+    await this.assertDayNotLocked({ branchId: branchObjectId, dateKey: nextDateKey, roles: params.roles });
 
     // no editar movimientos sistema si no sos admin
-    this.assertEditableBySource(row, roles);
+    this.assertEditableBySource(row, params.roles);
 
-    const nextDirection = (dto as any).direction ?? row.direction;
-    const nextAccountId = dto.accountId ?? String(row.accountId);
+    const nextDirection = (params.dto as any).direction ?? row.direction;
+    const nextAccountId = params.dto.accountId ?? String(row.accountId);
     const nextToAccountId =
-      dto.toAccountId !== undefined
-        ? dto.toAccountId
+      params.dto.toAccountId !== undefined
+        ? params.dto.toAccountId
         : row.toAccountId
           ? String(row.toAccountId)
           : null;
 
     this.validateMovementInput({
-      dateKey: dto.dateKey ?? row.dateKey,
+      dateKey: params.dto.dateKey ?? row.dateKey,
       direction: nextDirection,
-      amount: dto.amount ?? row.amount,
+      amount: params.dto.amount ?? row.amount,
       accountId: nextAccountId,
       toAccountId: nextToAccountId,
-      adjustmentSign: (dto as any).adjustmentSign ?? row.adjustmentSign,
+      adjustmentSign: (params.dto as any).adjustmentSign ?? row.adjustmentSign,
     });
 
-    // Bloqueo: no permitimos convertir un asiento a TRANSFER vía update (se hace void + create)
+    // Bloqueo: no permitimos convertir un asiento a TRANSFER vía update
     if (row.type === "TRANSFER" || nextDirection === FinanceMovementDirection.TRANSFER) {
       throw new BadRequestException("No se puede editar una TRANSFER. Hacé VOID y creá otra.");
     }
 
-    if (dto.dateKey !== undefined) row.dateKey = dto.dateKey;
+    if (params.dto.dateKey !== undefined) row.dateKey = params.dto.dateKey;
 
-    if ((dto as any).direction !== undefined) {
-      row.direction = (dto as any).direction;
-      row.type = this.legacyTypeFromDirection((dto as any).direction);
+    if ((params.dto as any).direction !== undefined) {
+      row.direction = (params.dto as any).direction;
+      row.type = this.legacyTypeFromDirection((params.dto as any).direction);
     }
 
-    if (dto.amount !== undefined) row.amount = dto.amount;
+    if (params.dto.amount !== undefined) row.amount = params.dto.amount;
 
-    if ((dto as any).adjustmentSign !== undefined) row.adjustmentSign = (dto as any).adjustmentSign;
-
-    if (dto.accountId !== undefined) row.accountId = this.oid(dto.accountId, "accountId");
-
-    if (dto.categoryId !== undefined) {
-      row.categoryId = dto.categoryId ? this.oid(dto.categoryId, "categoryId") : null;
+    if ((params.dto as any).adjustmentSign !== undefined) {
+      row.adjustmentSign = (params.dto as any).adjustmentSign;
     }
 
-    if (dto.providerId !== undefined) {
-      row.providerId = dto.providerId ? this.oid(dto.providerId, "providerId") : null;
+    if (params.dto.accountId !== undefined) {
+      // ✅ valida cuenta en la branch vía service (luego seteamos oid)
+      await this.accountsService.findOne({ branchId: params.branchId, id: params.dto.accountId });
+      row.accountId = this.oid(params.dto.accountId, "accountId");
     }
 
-    if (dto.notes !== undefined) row.notes = dto.notes ?? null;
+    if (params.dto.categoryId !== undefined) {
+      if (params.dto.categoryId) {
+        await this.categoriesService.findOne({ branchId: params.branchId, id: params.dto.categoryId });
+        row.categoryId = this.oid(params.dto.categoryId, "categoryId");
+      } else {
+        row.categoryId = null;
+      }
+    }
 
-    if (dto.status !== undefined) row.status = dto.status as FinanceMovementStatus;
+    if (params.dto.providerId !== undefined) {
+      row.providerId = params.dto.providerId ? this.oid(params.dto.providerId, "providerId") : null;
+    }
+
+    if (params.dto.notes !== undefined) row.notes = params.dto.notes ?? null;
+
+    if (params.dto.status !== undefined) row.status = params.dto.status as FinanceMovementStatus;
 
     // refrescar snapshots si cambió account/category
-    if (dto.accountId !== undefined || dto.categoryId !== undefined) {
+    if (params.dto.accountId !== undefined || params.dto.categoryId !== undefined) {
       const snaps = await this.getSnapshots({
+        branchId: params.branchId,
         accountId: row.accountId,
         categoryId: row.categoryId ?? null,
       });
@@ -468,19 +575,26 @@ export class FinanceMovementsService {
   // -----------------------------
   // Void
   // -----------------------------
-  async void(id: string, roles: string[]) {
-    if (!Types.ObjectId.isValid(id))
+  async void(params: { branchId: string; id: string; roles: string[] }) {
+    const branchObjectId = ensureBranchObjectId(params.branchId);
+
+    if (!Types.ObjectId.isValid(params.id))
       throw new BadRequestException("id inválido");
-    const row = await this.movementModel.findById(id);
+
+    const row = await this.movementModel.findOne({
+      _id: params.id,
+      branchId: branchObjectId,
+    });
+
     if (!row) throw new NotFoundException("Movimiento no encontrado");
 
-    await this.assertDayNotLocked(row.dateKey, roles);
-    this.assertEditableBySource(row, roles);
+    await this.assertDayNotLocked({ branchId: branchObjectId, dateKey: row.dateKey, roles: params.roles });
+    this.assertEditableBySource(row, params.roles);
 
-    // Si es parte de una transferencia, void ambos asientos
+    // Si es parte de una transferencia, void ambos asientos (solo en la branch)
     if (row.type === "TRANSFER" && row.transferGroupId) {
       await this.movementModel.updateMany(
-        { transferGroupId: row.transferGroupId },
+        { branchId: branchObjectId, transferGroupId: row.transferGroupId },
         { $set: { status: "VOID" } },
       );
       return { ok: true };
@@ -495,6 +609,7 @@ export class FinanceMovementsService {
   // DTO mappers
   // -----------------------------
   private toTransferDTO(p: {
+    branchId: string;
     transferGroupId: Types.ObjectId;
     dateKey: string;
     amount: number;
@@ -510,6 +625,7 @@ export class FinanceMovementsService {
   }) {
     return {
       id: String(p.transferGroupId), // 👈 para UI es el “id” de la transferencia
+      branchId: p.branchId,
       transferGroupId: String(p.transferGroupId),
       dateKey: p.dateKey,
       type: "TRANSFER",
@@ -534,6 +650,7 @@ export class FinanceMovementsService {
   private toDTO(row: any) {
     return {
       id: String(row._id),
+      branchId: row.branchId ? String(row.branchId) : null,
       dateKey: row.dateKey,
       type: row.type,
       direction: row.direction,

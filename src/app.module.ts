@@ -5,7 +5,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
-// import { StockSnapshotsModule } from './stock-snapshots/stock-snapshots.module';
 import { EmployeesModule } from './employees/employees.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { TasksModule } from './tasks/tasks.module';
@@ -29,7 +28,6 @@ import { FinanceCategoriesModule } from './finance/categories/finance-categories
 import { FinanceClosingsModule } from './finance/closings/finance-closings.module';
 import { FinanceStatsModule } from './finance/stats/finance-stats.module';
 import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
-import { SettingsModule } from './settings/settings.module';
 import { BranchesModule } from './branches/branches.module';
 import { ScheduleModule } from '@nestjs/schedule';
 
@@ -49,7 +47,6 @@ import { ScheduleModule } from '@nestjs/schedule';
     AuthModule,
     SuppliersModule,
     IngredientsModule,
-    // StockSnapshotsModule,
     EmployeesModule,
     AttendanceModule,
     TasksModule,
@@ -72,7 +69,6 @@ import { ScheduleModule } from '@nestjs/schedule';
     FinanceClosingsModule,
     FinanceStatsModule,
     PurchaseOrdersModule,
-    SettingsModule,
     BranchesModule,
   ],
 })

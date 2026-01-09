@@ -19,6 +19,13 @@ function assertDateKey(s: string) {
   }
 }
 
+function branchOid(branchId: string) {
+  if (!branchId || !Types.ObjectId.isValid(branchId)) {
+    throw new BadRequestException("branchId inválido");
+  }
+  return new Types.ObjectId(branchId);
+}
+
 @Injectable()
 export class FinanceClosingsService {
   constructor(
@@ -46,20 +53,27 @@ export class FinanceClosingsService {
     return [...map.entries()].map(([accountId, balance]) => ({ accountId, balance }));
   }
 
-  async getOrCreate(dateKey: string, userId?: string) {
-    assertDateKey(dateKey);
+  /* =========================
+   * Get or Create (branch)
+   * ========================= */
+  async getOrCreate(params: { branchId: string; dateKey: string; userId?: string }) {
+    assertDateKey(params.dateKey);
+    const b = branchOid(params.branchId);
 
-    let row = await this.closingModel.findOne({ dateKey });
+    let row = await this.closingModel.findOne({ branchId: b, dateKey: params.dateKey });
     if (!row) {
       row = await this.closingModel.create({
-        dateKey,
+        branchId: b,
+        dateKey: params.dateKey,
         status: "OPEN",
         declaredBalances: [],
         computedBalances: [],
         diffBalances: [],
         notes: null,
         createdByUserId:
-          userId && Types.ObjectId.isValid(userId) ? new Types.ObjectId(userId) : null,
+          params.userId && Types.ObjectId.isValid(params.userId)
+            ? new Types.ObjectId(params.userId)
+            : null,
         submittedByUserId: null,
         lockedByUserId: null,
         submittedAt: null,
@@ -69,44 +83,73 @@ export class FinanceClosingsService {
     return row;
   }
 
-  async getOne(dateKey: string) {
-    assertDateKey(dateKey);
-    const row = await this.closingModel.findOne({ dateKey }).lean();
+  async getOne(params: { branchId: string; dateKey: string }) {
+    assertDateKey(params.dateKey);
+    const b = branchOid(params.branchId);
+
+    const row = await this.closingModel
+      .findOne({ branchId: b, dateKey: params.dateKey })
+      .lean();
+
     if (!row) throw new NotFoundException("Cierre no encontrado");
     return this.toDTO(row);
   }
 
-  async upsertDeclared(dateKey: string, userId: string, dto: UpsertDayClosingDto) {
-    assertDateKey(dateKey);
-    const closing = await this.getOrCreate(dateKey, userId);
+  async upsertDeclared(params: {
+    branchId: string;
+    dateKey: string;
+    userId: string;
+    dto: UpsertDayClosingDto;
+  }) {
+    assertDateKey(params.dateKey);
+
+    const closing = await this.getOrCreate({
+      branchId: params.branchId,
+      dateKey: params.dateKey,
+      userId: params.userId,
+    });
 
     if (closing.status === "LOCKED") {
       throw new BadRequestException("El cierre está LOCKED y no se puede editar");
     }
 
-    const declaredNorm = this.normBalances(dto.declaredBalances || []);
+    const declaredNorm = this.normBalances(params.dto.declaredBalances || []);
+
+    // ✅ opcional: validar que las cuentas existan en esta branch (evita ids cruzados)
+    // si querés hard validation, descomentá:
+    // for (const r of declaredNorm) {
+    //   await this.accountsService.findOne({ branchId: params.branchId, id: r.accountId });
+    // }
 
     closing.declaredBalances = declaredNorm.map((r) => ({
       accountId: this.oid(r.accountId, "accountId"),
       balance: Number(r.balance ?? 0),
     })) as any;
 
-    if (dto.notes !== undefined) closing.notes = dto.notes ?? null;
+    if (params.dto.notes !== undefined) closing.notes = params.dto.notes ?? null;
 
     await closing.save();
     return this.toDTO(closing.toObject());
   }
 
-  async submit(dateKey: string, userId: string) {
-    assertDateKey(dateKey);
-    const closing = await this.getOrCreate(dateKey, userId);
+  async submit(params: { branchId: string; dateKey: string; userId: string }) {
+    assertDateKey(params.dateKey);
+
+    const closing = await this.getOrCreate({
+      branchId: params.branchId,
+      dateKey: params.dateKey,
+      userId: params.userId,
+    });
 
     if (closing.status === "LOCKED") {
       throw new BadRequestException("El cierre está LOCKED y no se puede enviar");
     }
 
     // 1) computed usando ledger (incluye openingBalance)
-    const computed = await this.computeBalancesUpTo(dateKey);
+    const computed = await this.computeBalancesUpTo({
+      branchId: params.branchId,
+      dateKey: params.dateKey,
+    });
 
     const computedMap = new Map<string, number>();
     for (const c of computed) computedMap.set(String(c.accountId), c.balance);
@@ -133,15 +176,20 @@ export class FinanceClosingsService {
 
     closing.status = "SUBMITTED";
     closing.submittedAt = new Date();
-    closing.submittedByUserId = this.oid(userId, "userId");
+    closing.submittedByUserId = this.oid(params.userId, "userId");
 
     await closing.save();
     return this.toDTO(closing.toObject());
   }
 
-  async lock(dateKey: string, adminUserId: string) {
-    assertDateKey(dateKey);
-    const closing = await this.getOrCreate(dateKey, adminUserId);
+  async lock(params: { branchId: string; dateKey: string; adminUserId: string }) {
+    assertDateKey(params.dateKey);
+
+    const closing = await this.getOrCreate({
+      branchId: params.branchId,
+      dateKey: params.dateKey,
+      userId: params.adminUserId,
+    });
 
     if (closing.status !== "SUBMITTED") {
       throw new BadRequestException("Solo se puede LOCKEAR un cierre SUBMITTED");
@@ -149,37 +197,32 @@ export class FinanceClosingsService {
 
     closing.status = "LOCKED";
     closing.lockedAt = new Date();
-    closing.lockedByUserId = this.oid(adminUserId, "userId");
+    closing.lockedByUserId = this.oid(params.adminUserId, "userId");
     await closing.save();
 
     return this.toDTO(closing.toObject());
   }
 
   /**
-   * Calcula saldos por cuenta hasta dateKey inclusive:
+   * Calcula saldos por cuenta hasta dateKey inclusive (por branch):
    * openingBalance + Σ signedMovement
-   *
-   * signedMovement:
-   * - direction IN  => +amount
-   * - direction OUT => -amount
-   * - direction ADJUSTMENT => adjustmentSign * amount (default +)
-   *
-   * TRANSFER:
-   * - Si tu sistema ya guarda 2 asientos (OUT e IN), entra natural por direction.
-   * - Si todavía existe data legacy con type=TRANSFER + toAccountId, aplicamos fallback.
    */
-  async computeBalancesUpTo(dateKey: string): Promise<Array<{ accountId: Types.ObjectId; balance: number }>> {
-    assertDateKey(dateKey);
+  async computeBalancesUpTo(params: {
+    branchId: string;
+    dateKey: string;
+  }): Promise<Array<{ accountId: Types.ObjectId; balance: number }>> {
+    assertDateKey(params.dateKey);
+    const b = branchOid(params.branchId);
 
-    // Traemos cuentas (incluye requiresClosing)
+    // Traemos cuentas de la branch
     const accounts = await this.accountsService.findAll({
+      branchId: params.branchId,
       active: undefined as any,
       includeDeleted: false,
       q: undefined,
       type: undefined as any,
     } as any);
 
-    // Base con openingBalance
     const baseMap = new Map<string, number>();
     const requiresClosingMap = new Map<string, boolean>();
 
@@ -188,13 +231,13 @@ export class FinanceClosingsService {
       requiresClosingMap.set(a.id, a.requiresClosing ?? true);
     }
 
-    // Aggregate ledger moderno: agrupar por accountId
+    // Aggregate ledger moderno (FILTRADO POR BRANCH)
     const aggModern = await this.movementModel.aggregate([
       {
         $match: {
+          branchId: b,
           status: { $ne: "VOID" },
-          dateKey: { $lte: dateKey },
-          // usa direction si existe; si no existe (legacy), igual pasa y lo cubrimos luego
+          dateKey: { $lte: params.dateKey },
         },
       },
       {
@@ -212,7 +255,10 @@ export class FinanceClosingsService {
           signed: {
             $switch: {
               branches: [
-                { case: { $eq: ["$direction", FinanceMovementDirection.IN] }, then: "$amount" },
+                {
+                  case: { $eq: ["$direction", FinanceMovementDirection.IN] },
+                  then: "$amount",
+                },
                 {
                   case: { $eq: ["$direction", FinanceMovementDirection.OUT] },
                   then: { $multiply: ["$amount", -1] },
@@ -222,7 +268,7 @@ export class FinanceClosingsService {
                   then: { $multiply: ["$amount", { $ifNull: ["$adjustmentSign", 1] }] },
                 },
               ],
-              default: null, // legacy or missing direction
+              default: null,
             },
           },
         },
@@ -251,9 +297,7 @@ export class FinanceClosingsService {
       baseMap.set(accId, (baseMap.get(accId) ?? 0) + Number(r.sumSigned ?? 0));
     }
 
-    // Fallback legacy transfers: type=TRANSFER con toAccountId (solo si faltaba direction)
-    // Esto evita doble conteo: solo aplica si direction es null/undefined en ese doc.
-    // Como en aggregation agrupamos, tenemos que recorrer legacyTransfers.
+    // Fallback legacy transfers (si faltaba direction)
     for (const r of aggModern) {
       const fromId = r._id ? String(r._id) : null;
       if (!fromId) continue;
@@ -261,13 +305,11 @@ export class FinanceClosingsService {
       const legacy = Array.isArray(r.legacyTransfers) ? r.legacyTransfers : [];
       for (const m of legacy) {
         if (m?.type !== FinanceMovementType.TRANSFER) continue;
-        if (m?.direction) continue; // si ya tiene direction, NO es legacy
+        if (m?.direction) continue;
         const amt = Number(m.amount ?? 0);
         const toId = m.toAccountId ? String(m.toAccountId) : null;
 
-        // salida
         baseMap.set(fromId, (baseMap.get(fromId) ?? 0) - amt);
-        // entrada
         if (toId) {
           if (!baseMap.has(toId)) baseMap.set(toId, 0);
           baseMap.set(toId, (baseMap.get(toId) ?? 0) + amt);
@@ -275,8 +317,7 @@ export class FinanceClosingsService {
       }
     }
 
-    // 🔑 Importante: por defecto, para cierre usamos solo requiresClosing=true
-    // (pero si el cashier declaró una cuenta no-arqueable, igual aparece en diffs por declaredBalances)
+    // Solo requiresClosing=true
     const result: Array<{ accountId: Types.ObjectId; balance: number }> = [];
     for (const [id, bal] of baseMap.entries()) {
       if (!Types.ObjectId.isValid(id)) continue;
@@ -298,6 +339,8 @@ export class FinanceClosingsService {
 
     return {
       id: String(row._id),
+      branchId: row.branchId ? String(row.branchId) : null,
+
       dateKey: row.dateKey,
       status: row.status,
       notes: row.notes ?? null,

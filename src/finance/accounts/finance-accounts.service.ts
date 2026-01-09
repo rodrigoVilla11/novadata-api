@@ -17,6 +17,13 @@ function normCurrency(cur?: string) {
   return c || "ARS";
 }
 
+function ensureBranchObjectId(branchId: string) {
+  if (!branchId || !Types.ObjectId.isValid(branchId)) {
+    throw new BadRequestException("branchId inválido");
+  }
+  return new Types.ObjectId(branchId);
+}
+
 @Injectable()
 export class FinanceAccountsService {
   constructor(
@@ -24,7 +31,11 @@ export class FinanceAccountsService {
     private readonly accountModel: Model<FinanceAccountDocument>,
   ) {}
 
-  async create(userId: string, dto: CreateFinanceAccountDto) {
+  async create(params: { userId: string; branchId: string; dto: CreateFinanceAccountDto }) {
+    const { userId, branchId, dto } = params;
+
+    const branchObjectId = ensureBranchObjectId(branchId);
+
     const name = (dto.name || "").trim();
     if (!name) throw new BadRequestException("name is required");
 
@@ -39,6 +50,7 @@ export class FinanceAccountsService {
 
     try {
       const created = await this.accountModel.create({
+        branchId: branchObjectId,
         code,
         name,
         type: dto.type,
@@ -54,15 +66,22 @@ export class FinanceAccountsService {
       return this.toDTO(created);
     } catch (e: any) {
       if (String(e?.code) === "11000") {
-        // puede venir por name o code
-        throw new BadRequestException("Ya existe una cuenta con ese nombre o code");
+        // puede venir por name o code (ahora por branchId+name o branchId+code)
+        throw new BadRequestException("Ya existe una cuenta con ese nombre o code en esta sucursal");
       }
       throw e;
     }
   }
 
-  async findAll(params: { active?: boolean; type?: string; q?: string; includeDeleted?: boolean }) {
+  async findAll(params: {
+    branchId: string;
+    active?: boolean;
+    type?: string;
+    q?: string;
+    includeDeleted?: boolean;
+  }) {
     const filter: any = {};
+    filter.branchId = ensureBranchObjectId(params.branchId);
 
     if (!params.includeDeleted) filter.deletedAt = null;
     if (typeof params.active === "boolean") filter.isActive = params.active;
@@ -87,14 +106,28 @@ export class FinanceAccountsService {
     return rows.map((r) => this.toDTO(r));
   }
 
-  async findOne(id: string) {
-    const row = await this.accountModel.findById(id).lean();
+  async findOne(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.accountModel
+      .findOne({
+        _id: id,
+        branchId: ensureBranchObjectId(branchId),
+      })
+      .lean();
+
     if (!row || row.deletedAt) throw new NotFoundException("Cuenta no encontrada");
     return this.toDTO(row);
   }
 
-  async update(id: string, dto: UpdateFinanceAccountDto) {
-    const row = await this.accountModel.findById(id);
+  async update(params: { branchId: string; id: string; dto: UpdateFinanceAccountDto }) {
+    const { branchId, id, dto } = params;
+
+    const row = await this.accountModel.findOne({
+      _id: id,
+      branchId: ensureBranchObjectId(branchId),
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Cuenta no encontrada");
 
     if (dto.code !== undefined) {
@@ -125,7 +158,7 @@ export class FinanceAccountsService {
       await row.save();
     } catch (e: any) {
       if (String(e?.code) === "11000") {
-        throw new BadRequestException("Ya existe una cuenta con ese nombre o code");
+        throw new BadRequestException("Ya existe una cuenta con ese nombre o code en esta sucursal");
       }
       throw e;
     }
@@ -133,8 +166,14 @@ export class FinanceAccountsService {
     return this.toDTO(row.toObject());
   }
 
-  async archive(id: string) {
-    const row = await this.accountModel.findById(id);
+  async archive(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.accountModel.findOne({
+      _id: id,
+      branchId: ensureBranchObjectId(branchId),
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Cuenta no encontrada");
 
     row.isActive = false;
@@ -142,8 +181,14 @@ export class FinanceAccountsService {
     return { ok: true };
   }
 
-  async restore(id: string) {
-    const row = await this.accountModel.findById(id);
+  async restore(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.accountModel.findOne({
+      _id: id,
+      branchId: ensureBranchObjectId(branchId),
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Cuenta no encontrada");
 
     row.isActive = true;
@@ -151,8 +196,14 @@ export class FinanceAccountsService {
     return { ok: true };
   }
 
-  async softDelete(id: string) {
-    const row = await this.accountModel.findById(id);
+  async softDelete(params: { branchId: string; id: string }) {
+    const { branchId, id } = params;
+
+    const row = await this.accountModel.findOne({
+      _id: id,
+      branchId: ensureBranchObjectId(branchId),
+    });
+
     if (!row || row.deletedAt) throw new NotFoundException("Cuenta no encontrada");
 
     row.isActive = false;
@@ -164,6 +215,7 @@ export class FinanceAccountsService {
   private toDTO(row: any) {
     return {
       id: String(row._id),
+      branchId: row.branchId ? String(row.branchId) : null,
       code: row.code,
       name: row.name,
       type: row.type,

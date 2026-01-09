@@ -18,35 +18,46 @@ export enum FinanceCategoryDirection {
 
 @Schema({ timestamps: true })
 export class FinanceCategory {
-  @Prop({ required: true, trim: true, index: true })
+  /* ======================
+   * Multi-branch
+   * ====================== */
+  @Prop({
+    type: Types.ObjectId,
+    ref: "Branch",
+    required: true,
+    index: true,
+  })
+  branchId!: Types.ObjectId;
+
+  @Prop({ type: String, required: true, trim: true })
   code!: string; // ej: "ventas", "sueldos", "proveedores", "transferencias"
 
-  @Prop({ required: true, trim: true })
+  @Prop({ type: String, required: true, trim: true })
   name!: string;
 
   // legacy/compat: lo podés dejar mientras migrás
-  @Prop({ required: true, enum: FinanceCategoryType, index: true })
+  @Prop({ type: String, required: true, enum: FinanceCategoryType, index: true })
   type!: FinanceCategoryType;
 
   // nuevo: el que usa movements/stats
-  @Prop({ required: true, enum: FinanceCategoryDirection, index: true })
+  @Prop({ type: String, required: true, enum: FinanceCategoryDirection, index: true })
   direction!: FinanceCategoryDirection;
 
   @Prop({ type: Types.ObjectId, default: null, index: true })
   parentId?: Types.ObjectId | null;
 
-  @Prop({ default: 0 })
+  @Prop({ type: Number, default: 0 })
   order?: number;
 
-  @Prop({ default: true, index: true })
+  @Prop({ type: Boolean, default: true, index: true })
   isActive!: boolean;
 
   // Para P&L (resultado)
-  @Prop({ default: true, index: true })
+  @Prop({ type: Boolean, default: true, index: true })
   affectsProfit!: boolean;
 
   // Para dashboards/stats (permitís ocultar internas)
-  @Prop({ default: true, index: true })
+  @Prop({ type: Boolean, default: true, index: true })
   includeInStats!: boolean;
 
   @Prop({ type: Types.ObjectId, default: null, index: true })
@@ -56,9 +67,15 @@ export class FinanceCategory {
   deletedAt?: Date | null;
 }
 
-export const FinanceCategorySchema = SchemaFactory.createForClass(FinanceCategory);
+export const FinanceCategorySchema =
+  SchemaFactory.createForClass(FinanceCategory);
+
+/* ======================
+ * Índices listados
+ * ====================== */
 
 FinanceCategorySchema.index({
+  branchId: 1,
   direction: 1,
   type: 1,
   isActive: 1,
@@ -67,9 +84,13 @@ FinanceCategorySchema.index({
   name: 1,
 });
 
-// Unique por code (case-insensitive) y no borradas
+/* ======================
+ * Unicidades por branch
+ * ====================== */
+
+// Unique por code (case-insensitive) y no borradas (POR SUCURSAL)
 FinanceCategorySchema.index(
-  { code: 1 },
+  { branchId: 1, code: 1 },
   {
     unique: true,
     partialFilterExpression: { deletedAt: null },
@@ -77,9 +98,9 @@ FinanceCategorySchema.index(
   },
 );
 
-// Opcional: evitar duplicado de name dentro del mismo padre/direction
+// Opcional: evitar duplicado de name dentro del mismo parent/direction (POR SUCURSAL)
 FinanceCategorySchema.index(
-  { parentId: 1, direction: 1, name: 1 },
+  { branchId: 1, parentId: 1, direction: 1, name: 1 },
   {
     unique: true,
     partialFilterExpression: { deletedAt: null },

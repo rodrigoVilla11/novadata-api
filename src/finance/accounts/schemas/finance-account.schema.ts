@@ -11,12 +11,23 @@ export enum FinanceAccountType {
 
 @Schema({ timestamps: true })
 export class FinanceAccount {
+  /* ======================
+   * Multi-branch
+   * ====================== */
+  @Prop({
+    type: Types.ObjectId,
+    ref: "Branch",
+    required: true,
+    index: true,
+  })
+  branchId!: Types.ObjectId;
+
   // Identificador estable (no cambia aunque cambie el nombre visible)
   // Ej: "cash", "mp", "santander"
-  @Prop({ required: true, trim: true, index: true })
+  @Prop({ required: true, trim: true })
   code!: string;
 
-  @Prop({ required: true, trim: true, index: true })
+  @Prop({ required: true, trim: true })
   name!: string; // "Efectivo", "Santander", "Galicia", "Mercado Pago"
 
   @Prop({ required: true, enum: FinanceAccountType, index: true })
@@ -45,28 +56,5 @@ export class FinanceAccount {
   deletedAt?: Date | null;
 }
 
-export const FinanceAccountSchema = SchemaFactory.createForClass(FinanceAccount);
-
-FinanceAccountSchema.index({ isActive: 1, type: 1, name: 1 });
-FinanceAccountSchema.index({ isActive: 1, requiresClosing: 1, type: 1 });
-
-// Unicidad por code (case-insensitive) solo para no eliminados
-FinanceAccountSchema.index(
-  { code: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { deletedAt: null },
-    collation: { locale: "en", strength: 2 },
-  },
-);
-
-// Mantengo tu unique por name (case-insensitive) para no duplicar nombres visibles.
-// Si preferís permitir nombres repetidos, borrá este index.
-FinanceAccountSchema.index(
-  { name: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { deletedAt: null },
-    collation: { locale: "en", strength: 2 },
-  },
-);
+export const FinanceAccountSchema =
+  SchemaFactory.createForClass(FinanceAccount);
