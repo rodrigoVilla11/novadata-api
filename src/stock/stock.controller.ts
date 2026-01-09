@@ -120,4 +120,13 @@ export class StockController {
       limit: limit ? Number(limit) : undefined,
     });
   }
+  @Get('alerts')
+  getAlerts(@Req() req: any, @Query('dateKey') dateKey?: string) {
+    const branchId = this.getBranchIdOrThrow(req);
+
+    return this.stockService.getAlerts({
+      branchId,
+      dateKey: dateKey?.trim() ? dateKey.trim() : undefined,
+    });
+  }
 }

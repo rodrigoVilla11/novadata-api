@@ -66,6 +66,21 @@ type ApplySaleReversalInput = {
   userId?: string | null;
 };
 
+function isValidDateKey(s: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
+type StockAlertRow = {
+  productId: string;
+  name: string;
+  providerId?: string | null;
+  providerName?: string | null;
+  unit?: string | null;
+  qty: number | null;
+  minQty: number | null;
+  status: 'LOW' | 'NO_COUNT';
+};
+
 @Injectable()
 export class StockService {
   constructor(
@@ -228,7 +243,10 @@ export class StockService {
     }
 
     // Expandir productos -> ingredientes y acumular
-    const acc = new Map<string, { ingredientId: string; unit: Unit; qty: number }>();
+    const acc = new Map<
+      string,
+      { ingredientId: string; unit: Unit; qty: number }
+    >();
 
     for (const line of dto.lines) {
       const productId = String(line.productId || '').trim();
@@ -249,7 +267,11 @@ export class StockService {
         const key = `${it.ingredientId}::${it.unit}`;
         const prev = acc.get(key);
         if (!prev) {
-          acc.set(key, { ingredientId: it.ingredientId, unit: it.unit, qty: it.qty });
+          acc.set(key, {
+            ingredientId: it.ingredientId,
+            unit: it.unit,
+            qty: it.qty,
+          });
         } else {
           prev.qty += it.qty;
         }
@@ -261,13 +283,19 @@ export class StockService {
       .filter((x) => x.qty > 0);
 
     if (!items.length) {
-      throw new BadRequestException('No ingredient consumption computed from sale');
+      throw new BadRequestException(
+        'No ingredient consumption computed from sale',
+      );
     }
 
     const session = await this.conn.startSession();
     try {
       const result = await session.withTransaction(async () => {
-        const outItems: Array<{ ingredientId: string; unit: Unit; qty: number }> = [];
+        const outItems: Array<{
+          ingredientId: string;
+          unit: Unit;
+          qty: number;
+        }> = [];
         let created = 0;
 
         for (const it of items) {
@@ -303,7 +331,10 @@ export class StockService {
           } catch (e: any) {
             const msg = String(e?.message ?? '');
             const code = e?.code;
-            const isDup = code === 11000 || msg.includes('E11000') || msg.includes('Duplicate movement');
+            const isDup =
+              code === 11000 ||
+              msg.includes('E11000') ||
+              msg.includes('Duplicate movement');
             if (!isDup) throw e;
           }
 
@@ -451,7 +482,10 @@ export class StockService {
       throw new BadRequestException('lines[] is required');
     }
 
-    const acc = new Map<string, { ingredientId: string; unit: Unit; qty: number }>();
+    const acc = new Map<
+      string,
+      { ingredientId: string; unit: Unit; qty: number }
+    >();
 
     for (const line of dto.lines) {
       const productId = String(line.productId || '').trim();
@@ -470,7 +504,12 @@ export class StockService {
       for (const it of expanded.items) {
         const key = `${it.ingredientId}::${it.unit}`;
         const prev = acc.get(key);
-        if (!prev) acc.set(key, { ingredientId: it.ingredientId, unit: it.unit, qty: it.qty });
+        if (!prev)
+          acc.set(key, {
+            ingredientId: it.ingredientId,
+            unit: it.unit,
+            qty: it.qty,
+          });
         else prev.qty += it.qty;
       }
     }
@@ -531,11 +570,15 @@ export class StockService {
   /**
    * Balance actual (rápido): usa Ingredient.stock.onHand
    */
-  async getBalances(params: { branchId: string; ingredientId?: string | null }) {
+  async getBalances(params: {
+    branchId: string;
+    ingredientId?: string | null;
+  }) {
     const branchObjId = this.assertBranchId(params.branchId);
 
     const filter: any = { branchId: branchObjId };
-    if (params?.ingredientId) filter._id = new Types.ObjectId(params.ingredientId);
+    if (params?.ingredientId)
+      filter._id = new Types.ObjectId(params.ingredientId);
 
     const rows = await this.ingredientModel
       .find(filter)
@@ -573,7 +616,8 @@ export class StockService {
       assertDateKey(params.dateKey);
       filter.dateKey = params.dateKey;
     }
-    if (params?.ingredientId) filter.ingredientId = new Types.ObjectId(params.ingredientId);
+    if (params?.ingredientId)
+      filter.ingredientId = new Types.ObjectId(params.ingredientId);
     if (params?.refType) filter.refType = String(params.refType);
     if (params?.refId) filter.refId = new Types.ObjectId(params.refId);
 
@@ -601,7 +645,11 @@ export class StockService {
         refType: m.refType ?? null,
         refId: m.refId ? String(m.refId) : null,
 
-        ingredientId: ing ? String(ing._id) : m.ingredientId ? String(m.ingredientId) : null,
+        ingredientId: ing
+          ? String(ing._id)
+          : m.ingredientId
+            ? String(m.ingredientId)
+            : null,
         ingredientName: ing ? String(ing.displayName ?? ing.name ?? '') : null,
         unit: m.unit,
 
@@ -652,5 +700,73 @@ export class StockService {
       createdByUserId: input.createdByUserId ?? null,
       dedupeKey,
     });
+  }
+
+  async getAlerts(args: { branchId: string; dateKey?: string }) {
+    const { branchId, dateKey } = args;
+
+    if (dateKey && !isValidDateKey(dateKey)) {
+      throw new BadRequestException('dateKey inválido (YYYY-MM-DD)');
+    }
+
+    // ✅ Tomamos todo desde Ingredient (rápido y consistente con tu nuevo stock)
+    // Ajustá nombres de campos según tu schema real
+    const rows = await this.ingredientModel
+      .find(
+        {
+          branchId: new Types.ObjectId(branchId),
+          isActive: true,
+          'stock.trackStock': true,
+          deletedAt: { $exists: false },
+        },
+        {
+          name: 1,
+          displayName: 1,
+          baseUnit: 1,
+          supplierId: 1,
+          stock: 1,
+        },
+      )
+      .populate({ path: 'supplierId', select: 'name' })
+      .lean();
+
+    const out: StockAlertRow[] = [];
+
+    for (const ing of rows as any[]) {
+      const onHand = ing?.stock?.onHand;
+      const minQty = ing?.stock?.minQty;
+
+      // NO_COUNT: trackStock true pero no hay conteo/carga
+      const noCount =
+        onHand === null || onHand === undefined || Number.isNaN(Number(onHand));
+
+      // LOW: hay conteo y está por debajo del mínimo (minQty definido)
+      const low =
+        !noCount &&
+        minQty !== null &&
+        minQty !== undefined &&
+        !Number.isNaN(Number(minQty)) &&
+        Number(onHand) < Number(minQty);
+
+      if (!noCount && !low) continue;
+
+      out.push({
+        productId: String(ing._id),
+        name: ing.displayName || ing.name || '—',
+        providerId: ing?.supplierId?._id ? String(ing.supplierId._id) : null,
+        providerName: ing?.supplierId?.name ?? null,
+        unit: ing?.baseUnit ?? null,
+        qty: noCount ? null : Number(onHand),
+        minQty:
+          minQty === null ||
+          minQty === undefined ||
+          Number.isNaN(Number(minQty))
+            ? null
+            : Number(minQty),
+        status: noCount ? 'NO_COUNT' : 'LOW',
+      });
+    }
+
+    return out;
   }
 }

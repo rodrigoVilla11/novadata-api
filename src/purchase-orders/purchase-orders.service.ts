@@ -60,7 +60,9 @@ export class PurchaseOrdersService {
     const s = String(id ?? '').trim();
     if (!s) return null;
     if (!Types.ObjectId.isValid(s))
-      throw new BadRequestException(`${label ?? 'id'} must be a valid ObjectId`);
+      throw new BadRequestException(
+        `${label ?? 'id'} must be a valid ObjectId`,
+      );
     return new Types.ObjectId(s);
   }
 
@@ -144,11 +146,16 @@ export class PurchaseOrdersService {
     // ✅ ingredientes del branch
     const ings: any[] = ingredientObjIds.length
       ? await this.ingredientModel
-          .find({ _id: { $in: ingredientObjIds }, branchId: branchObjId } as any)
+          .find({
+            _id: { $in: ingredientObjIds },
+            branchId: branchObjId,
+          } as any)
           .lean()
       : [];
 
-    const ingMap = new Map<string, any>(ings.map((i: any) => [String(i._id), i]));
+    const ingMap = new Map<string, any>(
+      ings.map((i: any) => [String(i._id), i]),
+    );
 
     const items = itemsInput.map((it) => {
       const ing = ingMap.get(String(it.ingredientId));
@@ -165,7 +172,9 @@ export class PurchaseOrdersService {
       }
 
       const approxUnitPrice =
-        it.approxUnitPrice != null ? num(it.approxUnitPrice) : num(ing?.cost?.lastCost);
+        it.approxUnitPrice != null
+          ? num(it.approxUnitPrice)
+          : num(ing?.cost?.lastCost);
 
       const unit = (it.unit ?? ing.baseUnit ?? Unit.UNIT) as Unit;
 
@@ -209,7 +218,8 @@ export class PurchaseOrdersService {
 
     const q: any = { branchId: branchObjId, deletedAt: null };
 
-    if (params.supplierId) q.supplierId = this.oidOrThrow(params.supplierId, 'supplierId');
+    if (params.supplierId)
+      q.supplierId = this.oidOrThrow(params.supplierId, 'supplierId');
     if (params.status) q.status = params.status;
 
     const limit = Math.min(Math.max(num(params.limit) || 50, 1), 200);
@@ -256,11 +266,7 @@ export class PurchaseOrdersService {
     return this.toResponse(doc);
   }
 
-  async attachInvoice(
-    branchId: string,
-    id: string,
-    dto: AttachInvoiceDto,
-  ) {
+  async attachInvoice(branchId: string, id: string, dto: AttachInvoiceDto) {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
 
     const doc = await this.poModel.findOne({
@@ -306,7 +312,10 @@ export class PurchaseOrdersService {
 
         await session.withTransaction(async () => {
           const doc = await this.poModel
-            .findOne({ _id: this.oidOrThrow(id, 'id'), branchId: branchObjId } as any)
+            .findOne({
+              _id: this.oidOrThrow(id, 'id'),
+              branchId: branchObjId,
+            } as any)
             .session(session);
 
           if (!doc || (doc as any).deletedAt)
@@ -323,7 +332,9 @@ export class PurchaseOrdersService {
           }
 
           const dateKey = todayKeyArgentina();
-          const userObjId = dto.userId ? this.oidOrNull(dto.userId, 'userId') : null;
+          const userObjId = dto.userId
+            ? this.oidOrNull(dto.userId, 'userId')
+            : null;
 
           const updMap = new Map(
             (dto.items ?? []).map((i) => [String(i.ingredientId), i]),
@@ -365,7 +376,8 @@ export class PurchaseOrdersService {
             }
 
             it.receivedQty = nextReceived;
-            if (upd.realUnitPrice != null) it.realUnitPrice = num(upd.realUnitPrice);
+            if (upd.realUnitPrice != null)
+              it.realUnitPrice = num(upd.realUnitPrice);
           }
 
           // 2) Aplicar stock (y movimiento) vía StockService en la misma txn
@@ -388,7 +400,9 @@ export class PurchaseOrdersService {
               if (UPDATE_AVG_COST) {
                 const prevAvg = num((ing as any).cost?.avgCost);
                 (ing as any).cost.avgCost =
-                  prevAvg > 0 ? (prevAvg + d.realUnitPrice) / 2 : d.realUnitPrice;
+                  prevAvg > 0
+                    ? (prevAvg + d.realUnitPrice) / 2
+                    : d.realUnitPrice;
               }
 
               await ing.save({ session });
@@ -419,7 +433,8 @@ export class PurchaseOrdersService {
           );
 
           if (allReceived) doc.status = PurchaseOrderStatus.RECEIVED;
-          else if (someReceived) doc.status = PurchaseOrderStatus.RECEIVED_PARTIAL;
+          else if (someReceived)
+            doc.status = PurchaseOrderStatus.RECEIVED_PARTIAL;
 
           await doc.save({ session });
 
@@ -443,5 +458,28 @@ export class PurchaseOrdersService {
         await session.endSession();
       }
     }
+  }
+  /**
+   * Conteos para badges del Home / Dashboard
+   * "pending" = órdenes abiertas (no finalizadas/canceladas)
+   */
+  async getCounts(params: { branchId: string }) {
+    const branchObjId = this.oidOrThrow(params.branchId, 'branchId');
+
+    // ✅ Definimos "cerradas" como RECEIVED / RECEIVED_PARTIAL / CANCELLED
+    // Todo lo demás cuenta como "pendiente" (DRAFT, SENT, CONFIRMED, etc.)
+    const closedStatuses: PurchaseOrderStatus[] = [
+      PurchaseOrderStatus.CANCELLED,
+      PurchaseOrderStatus.RECEIVED,
+      PurchaseOrderStatus.RECEIVED_PARTIAL,
+    ];
+
+    const pending = await this.poModel.countDocuments({
+      branchId: branchObjId,
+      deletedAt: null,
+      status: { $nin: closedStatuses },
+    } as any);
+
+    return { pending };
   }
 }

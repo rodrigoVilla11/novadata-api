@@ -9,24 +9,24 @@ import {
   Query,
   Req,
   UseGuards,
-} from "@nestjs/common";
-import { AuthGuard } from "@nestjs/passport";
-import { Roles } from "src/auth/roles.decorator";
-import { PurchaseOrdersService } from "./purchase-orders.service";
-import { CreatePurchaseOrderDto } from "./dto/create-purchase-order.dto";
-import { PurchaseOrderStatus } from "./enums/purchase-order.enums";
-import { ReceivePurchaseOrderDto } from "./dto/receive.dto";
-import { AttachInvoiceDto } from "./dto/attach-invoice.dto";
+} from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+import { Roles } from 'src/auth/roles.decorator';
+import { PurchaseOrdersService } from './purchase-orders.service';
+import { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
+import { PurchaseOrderStatus } from './enums/purchase-order.enums';
+import { ReceivePurchaseOrderDto } from './dto/receive.dto';
+import { AttachInvoiceDto } from './dto/attach-invoice.dto';
 
-@Controller("purchase-orders")
-@UseGuards(AuthGuard("jwt"))
-@Roles("ADMIN", "MANAGER", "CASHIER")
+@Controller('purchase-orders')
+@UseGuards(AuthGuard('jwt'))
+@Roles('ADMIN', 'MANAGER', 'CASHIER')
 export class PurchaseOrdersController {
   constructor(private readonly service: PurchaseOrdersService) {}
 
   private getBranchIdOrThrow(req: any) {
-    const branchId = req?.user?.branchId ? String(req.user.branchId) : "";
-    if (!branchId) throw new BadRequestException("branchId is required");
+    const branchId = req?.user?.branchId ? String(req.user.branchId) : '';
+    if (!branchId) throw new BadRequestException('branchId is required');
     return branchId;
   }
 
@@ -39,9 +39,9 @@ export class PurchaseOrdersController {
   @Get()
   findAll(
     @Req() req: any,
-    @Query("supplierId") supplierId?: string,
-    @Query("status") status?: PurchaseOrderStatus,
-    @Query("limit") limit?: string
+    @Query('supplierId') supplierId?: string,
+    @Query('status') status?: PurchaseOrderStatus,
+    @Query('limit') limit?: string,
   ) {
     const branchId = this.getBranchIdOrThrow(req);
 
@@ -53,27 +53,33 @@ export class PurchaseOrdersController {
     });
   }
 
-  @Get(":id")
-  findOne(@Req() req: any, @Param("id") id: string) {
+  @Get('counts')
+  getCounts(@Req() req: any) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.getCounts({ branchId });
+  }
+
+  @Get(':id')
+  findOne(@Req() req: any, @Param('id') id: string) {
     const branchId = this.getBranchIdOrThrow(req);
     return this.service.findOne(branchId, id);
   }
 
-  @Patch(":id/status")
+  @Patch(':id/status')
   setStatus(
     @Req() req: any,
-    @Param("id") id: string,
-    @Body() dto: { status: PurchaseOrderStatus }
+    @Param('id') id: string,
+    @Body() dto: { status: PurchaseOrderStatus },
   ) {
     const branchId = this.getBranchIdOrThrow(req);
     return this.service.setStatus(branchId, id, dto.status);
   }
 
-  @Patch(":id/receive")
+  @Patch(':id/receive')
   receive(
     @Req() req: any,
-    @Param("id") id: string,
-    @Body() dto: ReceivePurchaseOrderDto
+    @Param('id') id: string,
+    @Body() dto: ReceivePurchaseOrderDto,
   ) {
     const branchId = this.getBranchIdOrThrow(req);
 
@@ -84,11 +90,11 @@ export class PurchaseOrdersController {
     });
   }
 
-  @Patch(":id/invoice")
+  @Patch(':id/invoice')
   attachInvoice(
     @Req() req: any,
-    @Param("id") id: string,
-    @Body() dto: AttachInvoiceDto
+    @Param('id') id: string,
+    @Body() dto: AttachInvoiceDto,
   ) {
     const branchId = this.getBranchIdOrThrow(req);
     return this.service.attachInvoice(branchId, id, dto);
