@@ -7,7 +7,9 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from 'src/auth/roles.decorator';
@@ -25,8 +27,7 @@ type PrepItemBody = {
 };
 
 type CreatePreparationBody = {
-  branchId: string; // ✅ obligatorio
-
+  // ❌ branchId ya NO viene en body
   name: string;
   description?: string | null;
   supplierId?: string | null;
@@ -41,10 +42,7 @@ type CreatePreparationBody = {
   items: PrepItemBody[];
 };
 
-type UpdatePreparationBody = Partial<Omit<CreatePreparationBody, 'branchId'>> & {
-  // ⛔️ explícito: no permitimos cambiar branchId acá
-  branchId?: never;
-};
+type UpdatePreparationBody = Partial<CreatePreparationBody>;
 
 @Controller('preparations')
 @UseGuards(AuthGuard('jwt'))
@@ -52,18 +50,26 @@ type UpdatePreparationBody = Partial<Omit<CreatePreparationBody, 'branchId'>> & 
 export class PreparationsController {
   constructor(private readonly service: PreparationsService) {}
 
+  private getBranchIdOrThrow(req: any) {
+    const branchId = req?.user?.branchId;
+    if (!branchId) throw new UnauthorizedException('Missing branchId in token');
+    return String(branchId);
+  }
+
   /**
-   * GET /preparations?branchId=...&onlyActive=true&supplierId=...&q=...
+   * GET /preparations?onlyActive=true&supplierId=...&q=...
    */
   @Get()
   findAll(
-    @Query('branchId') branchId?: string,
+    @Req() req: any,
     @Query('onlyActive') onlyActive?: string,
     @Query('supplierId') supplierId?: string,
     @Query('q') q?: string,
   ) {
+    const branchId = this.getBranchIdOrThrow(req);
+
     return this.service.findAll({
-      branchId: branchId || undefined,
+      branchId,
       onlyActive: onlyActive === 'true' || onlyActive === '1',
       supplierId: supplierId !== undefined ? supplierId : undefined,
       q: q || undefined,
@@ -71,35 +77,42 @@ export class PreparationsController {
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.service.findOne(id);
+  findOne(@Req() req: any, @Param('id') id: string) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.findOne(id, branchId);
   }
 
   /**
    * POST /preparations
-   * body requires branchId
    */
   @Post()
-  create(@Body() body: CreatePreparationBody) {
-    return this.service.create(body as any);
+  create(@Req() req: any, @Body() body: CreatePreparationBody) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.create(body as any, branchId);
   }
 
   /**
    * PATCH /preparations/:id
-   * No permite cambiar branchId
    */
   @Patch(':id')
-  update(@Param('id') id: string, @Body() body: UpdatePreparationBody) {
-    return this.service.update(id, body as any);
+  update(@Req() req: any, @Param('id') id: string, @Body() body: UpdatePreparationBody) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.update(id, body as any, branchId);
   }
 
   @Patch(':id/active')
-  setActive(@Param('id') id: string, @Body() body: { isActive: boolean }) {
-    return this.service.setActive(id, !!body?.isActive);
+  setActive(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: { isActive: boolean },
+  ) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.setActive(id, !!body?.isActive, branchId);
   }
 
   @Post(':id/recompute')
-  recompute(@Param('id') id: string) {
-    return this.service.recompute(id);
+  recompute(@Req() req: any, @Param('id') id: string) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.recompute(id, branchId);
   }
 }

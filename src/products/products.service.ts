@@ -17,14 +17,12 @@ import { Preparation } from '../preparations/schemas/preparation.schema';
 import { Category } from '../categories/schemas/category.schema';
 
 type Currency = 'ARS' | 'USD';
-
 type CreateOrUpdateProductInput = {
   name: string;
   description?: string | null;
 
-  branchId: string; // ✅ requerido
+  // ❌ branchId ya NO viene acá
   supplierId?: string | null;
-
   categoryId?: string | null;
 
   sku?: string | null;
@@ -46,7 +44,7 @@ type CreateOrUpdateProductInput = {
   currency?: Currency;
 
   salePrice?: number | null;
-  marginPct?: number | null; // 0..1 (margen)
+  marginPct?: number | null;
 
   tags?: string[];
   allergens?: Allergen[];
@@ -67,7 +65,6 @@ type CreateOrUpdateProductInput = {
 export class ProductsService {
   private readonly logger = new Logger(ProductsService.name);
 
-
   constructor(
     @InjectModel(Product.name) private readonly productModel: Model<Product>,
     @InjectModel(Ingredient.name)
@@ -78,15 +75,9 @@ export class ProductsService {
     private readonly categoryModel: Model<Category>,
   ) {}
 
-
-
-  // =====================================================================
-  // CRUD
-  // =====================================================================
-
-  async create(input: CreateOrUpdateProductInput) {
-    const payload = await this.normalizeInput(input);
-    const computed = await this.computeCosts(payload);
+  async create(input: CreateOrUpdateProductInput, branchId: string) {
+    const payload = await this.normalizeInput(input, branchId);
+    const computed = await this.computeCosts(payload, branchId);
 
     try {
       const doc = await this.productModel.create({ ...payload, computed });
@@ -100,8 +91,15 @@ export class ProductsService {
     }
   }
 
-  async update(id: string, input: Partial<CreateOrUpdateProductInput>) {
-    const existing = await this.productModel.findById(id);
+  async update(
+    id: string,
+    input: Partial<CreateOrUpdateProductInput>,
+    branchId: string,
+  ) {
+    const existing = await this.productModel.findOne({
+      _id: new Types.ObjectId(id),
+      branchId: new Types.ObjectId(branchId),
+    });
     if (!existing) throw new NotFoundException('Product not found');
 
     const merged = {
@@ -109,12 +107,12 @@ export class ProductsService {
       ...input,
     } as any as CreateOrUpdateProductInput;
 
-    const payload = await this.normalizeInput(merged);
-    const computed = await this.computeCosts(payload);
+    const payload = await this.normalizeInput(merged, branchId);
+    const computed = await this.computeCosts(payload, branchId);
 
     try {
-      const doc = await this.productModel.findByIdAndUpdate(
-        id,
+      const doc = await this.productModel.findOneAndUpdate(
+        { _id: new Types.ObjectId(id), branchId: new Types.ObjectId(branchId) },
         { ...payload, computed },
         { new: true },
       );
@@ -129,30 +127,31 @@ export class ProductsService {
     }
   }
 
-  async findAll(params?: {
+  async findAll(params: {
+    branchId: string; // ✅ obligatorio
     onlyActive?: boolean;
-    branchId?: string;
     supplierId?: string;
     categoryId?: string;
     q?: string;
     tag?: string;
     sellable?: boolean;
   }) {
-    const filter: any = {};
+    const filter: any = { branchId: new Types.ObjectId(params.branchId) };
 
-    if (params?.onlyActive) filter.isActive = true;
-    if (params?.sellable != null) filter.isSellable = !!params.sellable;
+    if (params.onlyActive) filter.isActive = true;
+    if (params.sellable != null) filter.isSellable = !!params.sellable;
 
-    if (params?.branchId) filter.branchId = new Types.ObjectId(params.branchId);
-    if (params?.supplierId) filter.supplierId = new Types.ObjectId(params.supplierId);
-    if (params?.categoryId) filter.categoryId = new Types.ObjectId(params.categoryId);
+    if (params.supplierId)
+      filter.supplierId = new Types.ObjectId(params.supplierId);
+    if (params.categoryId)
+      filter.categoryId = new Types.ObjectId(params.categoryId);
 
-    if (params?.tag?.trim()) {
+    if (params.tag?.trim()) {
       const tag = params.tag.trim().toLowerCase();
-      filter.tags = { $in: [tag] }; // ✅ tags es array
+      filter.tags = { $in: [tag] };
     }
 
-    if (params?.q?.trim()) {
+    if (params.q?.trim()) {
       const q = params.q.trim();
       filter.$or = [
         { name: { $regex: q, $options: 'i' } },
@@ -168,15 +167,20 @@ export class ProductsService {
     return items.map((x: any) => this.toDto(x));
   }
 
-  async findOne(id: string) {
-    const doc = await this.productModel.findById(id).lean();
+  async findOne(id: string, branchId: string) {
+    const doc = await this.productModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        branchId: new Types.ObjectId(branchId),
+      })
+      .lean();
     if (!doc) throw new NotFoundException('Product not found');
     return this.toDto(doc);
   }
 
-  async setActive(id: string, isActive: boolean) {
-    const doc = await this.productModel.findByIdAndUpdate(
-      id,
+  async setActive(id: string, isActive: boolean, branchId: string) {
+    const doc = await this.productModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(id), branchId: new Types.ObjectId(branchId) },
       { isActive: !!isActive },
       { new: true },
     );
@@ -184,54 +188,57 @@ export class ProductsService {
     return this.toDto(doc);
   }
 
-  async recompute(id: string) {
-    const doc = await this.productModel.findById(id).lean();
+  async recompute(id: string, branchId: string) {
+    const doc = await this.productModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        branchId: new Types.ObjectId(branchId),
+      })
+      .lean();
     if (!doc) throw new NotFoundException('Product not found');
 
-    const payload = await this.normalizeInput({
-      name: (doc as any).name,
-      description: (doc as any).description ?? null,
-      branchId: String((doc as any).branchId), // ✅ requerido
-      supplierId: (doc as any).supplierId ? String((doc as any).supplierId) : null,
-      categoryId: (doc as any).categoryId ? String((doc as any).categoryId) : null,
+    // normaliza usando SIEMPRE el branch del token
+    const payload = await this.normalizeInput(
+      {
+        name: (doc as any).name,
+        description: (doc as any).description ?? null,
+        supplierId: (doc as any).supplierId
+          ? String((doc as any).supplierId)
+          : null,
+        categoryId: (doc as any).categoryId
+          ? String((doc as any).categoryId)
+          : null,
+        sku: (doc as any).sku ?? null,
+        barcode: (doc as any).barcode ?? null,
+        isSellable: (doc as any).isSellable ?? true,
+        isProduced: (doc as any).isProduced ?? true,
+        yieldQty: (doc as any).yieldQty ?? 1,
+        yieldUnit: (doc as any).yieldUnit ?? Unit.UNIT,
+        portionSize: (doc as any).portionSize ?? null,
+        portionLabel: (doc as any).portionLabel ?? null,
+        wastePct: (doc as any).wastePct ?? 0,
+        extraCost: (doc as any).extraCost ?? 0,
+        packagingCost: (doc as any).packagingCost ?? 0,
+        currency: (doc as any).currency ?? 'ARS',
+        salePrice: (doc as any).salePrice ?? null,
+        marginPct: (doc as any).marginPct ?? null,
+        tags: (doc as any).tags ?? [],
+        allergens: (doc as any).allergens ?? [],
+        imageUrl: (doc as any).imageUrl ?? null,
+        galleryUrls: (doc as any).galleryUrls ?? [],
+        items: (doc as any).items ?? [],
+      } as any,
+      branchId,
+    );
 
-      sku: (doc as any).sku ?? null,
-      barcode: (doc as any).barcode ?? null,
+    const computed = await this.computeCosts(payload, branchId);
 
-      isSellable: (doc as any).isSellable ?? true,
-      isProduced: (doc as any).isProduced ?? true,
-
-      yieldQty: (doc as any).yieldQty ?? 1,
-      yieldUnit: (doc as any).yieldUnit ?? Unit.UNIT,
-
-      portionSize: (doc as any).portionSize ?? null,
-      portionLabel: (doc as any).portionLabel ?? null,
-
-      wastePct: (doc as any).wastePct ?? 0,
-      extraCost: (doc as any).extraCost ?? 0,
-      packagingCost: (doc as any).packagingCost ?? 0,
-
-      currency: (doc as any).currency ?? 'ARS',
-
-      salePrice: (doc as any).salePrice ?? null,
-      marginPct: (doc as any).marginPct ?? null,
-
-      tags: (doc as any).tags ?? [],
-      allergens: (doc as any).allergens ?? [],
-
-      imageUrl: (doc as any).imageUrl ?? null,
-      galleryUrls: (doc as any).galleryUrls ?? [],
-
-      items: (doc as any).items ?? [],
-    } as any);
-
-    const computed = await this.computeCosts(payload);
-
-    const updated = await this.productModel.findByIdAndUpdate(
-      id,
+    const updated = await this.productModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(id), branchId: new Types.ObjectId(branchId) },
       { computed },
       { new: true },
     );
+
     if (!updated) throw new NotFoundException('Product not found');
     return this.toDto(updated);
   }
@@ -272,22 +279,35 @@ export class ProductsService {
   ] as const;
 
   private itemKey(it: any) {
-    if (it?.type === ProductItemType.INGREDIENT) return `I:${String(it.ingredientId)}`;
-    if (it?.type === ProductItemType.PREPARATION) return `P:${String(it.preparationId)}`;
+    if (it?.type === ProductItemType.INGREDIENT)
+      return `I:${String(it.ingredientId)}`;
+    if (it?.type === ProductItemType.PREPARATION)
+      return `P:${String(it.preparationId)}`;
     return `?:${String(it?.type)}`;
   }
 
-  async addCommonItemsToAllProducts(opts?: {
-    onlyActive?: boolean;
-    branchId?: string;
-    recompute?: boolean;
-    dryRun?: boolean;
-  }) {
-    const filter: any = {};
-    if (opts?.onlyActive) filter.isActive = true;
-    if (opts?.branchId) filter.branchId = new Types.ObjectId(opts.branchId);
+  // ✅ Scoper: addCommonItemsToAllProducts (branchId desde token)
+  // - Recibe branchId obligatorio (del controller)
+  // - Filtra por branchId siempre
+  // - El update también incluye branchId (seguridad extra)
+  // - Si recompute=true, llama recompute(id, branchId)
 
-    const cursor = this.productModel.find(filter, { items: 1, name: 1 }).cursor();
+  async addCommonItemsToAllProducts(
+    branchId: string,
+    opts?: {
+      onlyActive?: boolean;
+      recompute?: boolean;
+      dryRun?: boolean;
+    },
+  ) {
+    const bId = new Types.ObjectId(branchId);
+
+    const filter: any = { branchId: bId };
+    if (opts?.onlyActive) filter.isActive = true;
+
+    const cursor = this.productModel
+      .find(filter, { items: 1, name: 1 })
+      .cursor();
 
     let total = 0;
     let touched = 0;
@@ -299,7 +319,9 @@ export class ProductsService {
       const items = Array.isArray(p.items) ? p.items : [];
       const seen = new Set(items.map((x: any) => this.itemKey(x)));
 
-      const toAdd = this.COMMON_ITEMS_TO_ADD.filter((x) => !seen.has(this.itemKey(x)));
+      const toAdd = this.COMMON_ITEMS_TO_ADD.filter(
+        (x) => !seen.has(this.itemKey(x)),
+      );
       if (!toAdd.length) continue;
 
       touched++;
@@ -307,18 +329,20 @@ export class ProductsService {
 
       if (opts?.dryRun) continue;
 
+      // ✅ seguridad: scope branch en el update también
       await this.productModel.updateOne(
-        { _id: p._id },
+        { _id: p._id, branchId: bId },
         { $push: { items: { $each: toAdd } } },
       );
 
       if (opts?.recompute) {
-        await this.recompute(String(p._id));
+        await this.recompute(String(p._id), branchId);
       }
     }
 
     return {
       ok: true,
+      branchId,
       total,
       touched,
       addedItems,
@@ -330,16 +354,17 @@ export class ProductsService {
   // =====================================================================
   // Normalize + Category integration
   // =====================================================================
+  private async normalizeInput(
+    input: CreateOrUpdateProductInput,
+    branchIdRaw: string,
+  ) {
+    if (!branchIdRaw || !Types.ObjectId.isValid(branchIdRaw)) {
+      throw new BadRequestException('branchId is required');
+    }
+    const branchId = new Types.ObjectId(branchIdRaw);
 
-  private async normalizeInput(input: CreateOrUpdateProductInput) {
     const name = String(input.name || '').trim();
     if (!name) throw new BadRequestException('name is required');
-
-    // ✅ branchId requerido
-    const branchIdRaw = String((input as any).branchId || '').trim();
-    if (!branchIdRaw) throw new BadRequestException('branchId is required');
-
-    const branchId = new Types.ObjectId(branchIdRaw);
 
     const yieldQty = this.num(input.yieldQty ?? 1);
     if (!Number.isFinite(yieldQty) || yieldQty <= 0) {
@@ -369,8 +394,12 @@ export class ProductsService {
     const isProduced = input.isProduced ?? true;
 
     const portionSize =
-      input.portionSize == null ? null : Math.max(0, this.num(input.portionSize));
-    const portionLabel = input.portionLabel ? String(input.portionLabel).trim() : null;
+      input.portionSize == null
+        ? null
+        : Math.max(0, this.num(input.portionSize));
+    const portionLabel = input.portionLabel
+      ? String(input.portionLabel).trim()
+      : null;
 
     const tags = (input.tags ?? [])
       .map((t) => String(t || '').trim())
@@ -388,7 +417,10 @@ export class ProductsService {
       const type = it.type as any as ProductItemType;
       const qty = this.num(it.qty);
 
-      if (type !== ProductItemType.INGREDIENT && type !== ProductItemType.PREPARATION) {
+      if (
+        type !== ProductItemType.INGREDIENT &&
+        type !== ProductItemType.PREPARATION
+      ) {
         throw new BadRequestException('Invalid item type');
       }
       if (!Number.isFinite(qty) || qty <= 0) {
@@ -410,10 +442,14 @@ export class ProductsService {
           : null;
 
       if (type === ProductItemType.INGREDIENT && !ingredientId) {
-        throw new BadRequestException('ingredientId is required for INGREDIENT item');
+        throw new BadRequestException(
+          'ingredientId is required for INGREDIENT item',
+        );
       }
       if (type === ProductItemType.PREPARATION && !preparationId) {
-        throw new BadRequestException('preparationId is required for PREPARATION item');
+        throw new BadRequestException(
+          'preparationId is required for PREPARATION item',
+        );
       }
 
       return {
@@ -425,22 +461,20 @@ export class ProductsService {
       };
     });
 
-    // evitar duplicados
     const seen = new Set<string>();
     for (const it of items) {
       const key =
         it.type === ProductItemType.INGREDIENT
           ? `I:${String(it.ingredientId)}`
           : `P:${String(it.preparationId)}`;
-      if (seen.has(key)) throw new BadRequestException('Duplicated item in items[]');
+      if (seen.has(key))
+        throw new BadRequestException('Duplicated item in items[]');
       seen.add(key);
     }
+    if (!items.length)
+      throw new BadRequestException('At least 1 item is required');
 
-    if (!items.length) throw new BadRequestException('At least 1 item is required');
-
-    // -----------------------
-    // Category: validate + hydrate categoryName
-    // -----------------------
+    // Category: validate + hydrate categoryName (✅ scoped por branch)
     let categoryId: Types.ObjectId | null = null;
     let categoryName: string | null = null;
 
@@ -448,62 +482,43 @@ export class ProductsService {
       categoryId = new Types.ObjectId(input.categoryId);
 
       const cat = await this.categoryModel
-        .findById(categoryId)
-        .select({ name: 1, branchId: 1, isActive: 1 })
+        .findOne({ _id: categoryId, branchId })
+        .select({ name: 1 })
         .lean();
 
-      if (!cat) throw new BadRequestException('categoryId not found');
-
-      const catBranch = (cat as any).branchId ? String((cat as any).branchId) : null;
-      const prodBranch = String(branchId);
-
-      if (catBranch && prodBranch && catBranch !== prodBranch) {
-        throw new BadRequestException('categoryId belongs to another branch');
-      }
+      if (!cat)
+        throw new BadRequestException(
+          'categoryId not found (or belongs to another branch)',
+        );
 
       categoryName = String((cat as any).name || '').trim() || null;
-    } else {
-      categoryId = null;
-      categoryName = null;
     }
 
     return {
       name,
       description: input.description ? String(input.description).trim() : null,
-
       branchId,
       supplierId,
-
       categoryId,
       categoryName,
-
       sku,
       barcode,
-
       isSellable: !!isSellable,
       isProduced: !!isProduced,
-
       yieldQty,
       yieldUnit: input.yieldUnit,
-
       portionSize,
       portionLabel,
-
       wastePct,
       extraCost,
       packagingCost,
-
       currency,
-
       salePrice,
       marginPct,
-
       tags,
       allergens,
-
       imageUrl,
       galleryUrls,
-
       items,
       isActive: (input as any).isActive ?? true,
     };
@@ -513,7 +528,9 @@ export class ProductsService {
   // Cost compute
   // =====================================================================
 
-  private async computeCosts(payload: any) {
+  private async computeCosts(payload: any, branchIdRaw: string) {
+    const branchId = new Types.ObjectId(branchIdRaw);
+
     const ingredientIds = payload.items
       .filter((x: any) => x.type === ProductItemType.INGREDIENT)
       .map((x: any) => x.ingredientId)
@@ -526,10 +543,14 @@ export class ProductsService {
 
     const [ings, preps] = await Promise.all([
       ingredientIds.length
-        ? this.ingredientModel.find({ _id: { $in: ingredientIds } }).lean()
+        ? this.ingredientModel
+            .find({ _id: { $in: ingredientIds }, branchId })
+            .lean()
         : Promise.resolve([]),
       preparationIds.length
-        ? this.preparationModel.find({ _id: { $in: preparationIds } }).lean()
+        ? this.preparationModel
+            .find({ _id: { $in: preparationIds }, branchId })
+            .lean()
         : Promise.resolve([]),
     ]);
 
@@ -546,13 +567,19 @@ export class ProductsService {
 
       if (it.type === ProductItemType.INGREDIENT) {
         const ing = ingById.get(String(it.ingredientId));
-        if (!ing) throw new BadRequestException(`Ingredient not found: ${String(it.ingredientId)}`);
+        if (!ing)
+          throw new BadRequestException(
+            `Ingredient not found in branch: ${String(it.ingredientId)}`,
+          );
 
         const unitCost = this.num(ing?.cost?.lastCost ?? 0);
         ingredientsCost += qty * unitCost;
       } else {
         const prep = prepById.get(String(it.preparationId));
-        if (!prep) throw new BadRequestException(`Preparation not found: ${String(it.preparationId)}`);
+        if (!prep)
+          throw new BadRequestException(
+            `Preparation not found in branch: ${String(it.preparationId)}`,
+          );
 
         const unitCost = this.num(prep?.computed?.unitCost ?? 0);
         ingredientsCost += qty * unitCost;
@@ -564,14 +591,19 @@ export class ProductsService {
     const packagingCost = Math.max(0, this.num(payload.packagingCost ?? 0));
     const yieldQty = Math.max(0.000001, this.num(payload.yieldQty ?? 1));
 
-    const totalCost = ingredientsCost * (1 + wastePct) + extraCost + packagingCost;
+    const totalCost =
+      ingredientsCost * (1 + wastePct) + extraCost + packagingCost;
     const unitCost = totalCost / yieldQty;
 
-    const salePrice = payload.salePrice == null ? null : Math.max(0, this.num(payload.salePrice));
-    const marginPct = payload.marginPct == null ? null : this.clamp01(this.num(payload.marginPct));
+    const salePrice =
+      payload.salePrice == null
+        ? null
+        : Math.max(0, this.num(payload.salePrice));
+    const marginPct =
+      payload.marginPct == null
+        ? null
+        : this.clamp01(this.num(payload.marginPct));
 
-    // ✅ suggestedPrice usando margen real (no markup):
-    // price = cost / (1 - margin)
     const suggestedPrice =
       salePrice != null
         ? null
@@ -658,7 +690,8 @@ export class ProductsService {
         suggestedPrice: doc?.computed?.suggestedPrice ?? null,
         marginPctUsed: doc?.computed?.marginPctUsed ?? null,
         grossMarginPct: doc?.computed?.grossMarginPct ?? null,
-        currency: doc?.computed?.currency || (doc.currency as Currency) || 'ARS',
+        currency:
+          doc?.computed?.currency || (doc.currency as Currency) || 'ARS',
         computedAt: doc?.computed?.computedAt ?? null,
       },
 

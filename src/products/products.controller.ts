@@ -6,8 +6,10 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
   BadRequestException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from 'src/auth/roles.decorator';
@@ -26,24 +28,31 @@ function assertObjectId(id?: string, label?: string) {
 export class ProductsController {
   constructor(private readonly service: ProductsService) {}
 
+  private getBranchIdOrThrow(req: any) {
+    const branchId = req?.user?.branchId;
+    if (!branchId) throw new UnauthorizedException('Missing branchId in token');
+    return String(branchId);
+  }
+
   @Get()
   @Roles('ADMIN', 'MANAGER', 'CASHIER')
   findAll(
+    @Req() req: any,
     @Query('onlyActive') onlyActive?: string,
-    @Query('branchId') branchId?: string,
     @Query('supplierId') supplierId?: string,
     @Query('categoryId') categoryId?: string,
     @Query('sellable') sellable?: string,
     @Query('tag') tag?: string,
     @Query('q') q?: string,
   ) {
-    assertObjectId(branchId, 'branchId');
+    const branchId = this.getBranchIdOrThrow(req);
+
     assertObjectId(supplierId, 'supplierId');
     assertObjectId(categoryId, 'categoryId');
 
     return this.service.findAll({
-      onlyActive: onlyActive == null ? undefined : onlyActive === 'true',
       branchId,
+      onlyActive: onlyActive == null ? undefined : onlyActive === 'true',
       supplierId,
       categoryId,
       sellable: sellable == null ? undefined : sellable === 'true',
@@ -54,35 +63,44 @@ export class ProductsController {
 
   @Get(':id')
   @Roles('ADMIN', 'MANAGER', 'CASHIER')
-  findOne(@Param('id') id: string) {
+  findOne(@Req() req: any, @Param('id') id: string) {
+    const branchId = this.getBranchIdOrThrow(req);
     assertObjectId(id, 'id');
-    return this.service.findOne(id);
+    return this.service.findOne(id, branchId);
   }
 
   @Post()
   @Roles('ADMIN', 'MANAGER')
-  create(@Body() body: any) {
-    return this.service.create(body);
+  create(@Req() req: any, @Body() body: any) {
+    const branchId = this.getBranchIdOrThrow(req);
+    return this.service.create(body, branchId);
   }
 
   @Patch(':id')
   @Roles('ADMIN', 'MANAGER')
-  update(@Param('id') id: string, @Body() body: any) {
+  update(@Req() req: any, @Param('id') id: string, @Body() body: any) {
+    const branchId = this.getBranchIdOrThrow(req);
     assertObjectId(id, 'id');
-    return this.service.update(id, body);
+    return this.service.update(id, body, branchId);
   }
 
   @Patch(':id/active')
   @Roles('ADMIN', 'MANAGER')
-  setActive(@Param('id') id: string, @Body() body: { isActive: boolean }) {
+  setActive(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: { isActive: boolean },
+  ) {
+    const branchId = this.getBranchIdOrThrow(req);
     assertObjectId(id, 'id');
-    return this.service.setActive(id, !!body?.isActive);
+    return this.service.setActive(id, !!body?.isActive, branchId);
   }
 
   @Post(':id/recompute')
   @Roles('ADMIN', 'MANAGER')
-  recompute(@Param('id') id: string) {
+  recompute(@Req() req: any, @Param('id') id: string) {
+    const branchId = this.getBranchIdOrThrow(req);
     assertObjectId(id, 'id');
-    return this.service.recompute(id);
+    return this.service.recompute(id, branchId);
   }
 }
