@@ -13,7 +13,10 @@ import {
 } from './schemas/attendance.schema';
 import { UpdateAttendanceDto } from './dto/update-attendance.dto';
 import { AttendanceSummaryQueryDto } from './dto/attendance-summary.dto';
-import { Employee, EmployeeDocument } from 'src/employees/schemas/employee.schema';
+import {
+  Employee,
+  EmployeeDocument,
+} from 'src/employees/schemas/employee.schema';
 
 function normalizeDateKey(dateKey: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
@@ -84,9 +87,10 @@ export class AttendanceService {
     return s ? s : null;
   }
 
-  private normalizeOptionalInput(
-    v: string | null | undefined,
-  ): { provided: boolean; value: string | null } {
+  private normalizeOptionalInput(v: string | null | undefined): {
+    provided: boolean;
+    value: string | null;
+  } {
     if (v === undefined) return { provided: false, value: null };
     const s = String(v ?? '').trim();
     return { provided: true, value: s ? s : null };
@@ -113,7 +117,11 @@ export class AttendanceService {
     return this.toDTO(doc);
   }
 
-  async list(params: { branchId: string; dateKey?: string; employeeId?: string }) {
+  async list(params: {
+    branchId: string;
+    dateKey?: string;
+    employeeId?: string;
+  }) {
     const branchId = toObjectId(params.branchId, 'branchId');
 
     const filter: any = { branchId };
@@ -157,11 +165,16 @@ export class AttendanceService {
     const branchId = toObjectId(input.branchId, 'branchId');
     const dateKey = normalizeDateKey(input.dateKey);
     const employeeId = toObjectId(input.employeeId, 'employeeId');
+    console.log('Attendance collection:', this.attendanceModel.collection.name);
+    console.log(
+      'Schema has branchId:',
+      !!this.attendanceModel.schema.path('branchId'),
+    );
+    console.log('Resolved branchId (ObjectId):', String(branchId));
 
     await this.assertEmployeeInBranch(employeeId, branchId);
 
     const now = input.at ?? new Date();
-
     const photo = this.normalizeOptionalInput(input.photoUrl);
     const notes = this.normalizeOptionalInput(input.notes);
 
@@ -169,40 +182,44 @@ export class AttendanceService {
       ? toObjectId(input.createdByUserId, 'createdByUserId')
       : null;
 
-    // ✅ No pisar createdBy: solo al crear
-    // ✅ checkInAt solo si está null
-    const pipeline: any[] = [
-      {
-        $setOnInsert: {
-          branchId,
-          dateKey,
-          employeeId,
-          createdBy,
-        },
+    const update: any = {
+      $setOnInsert: {
+        branchId,
+        dateKey,
+        employeeId,
+        createdBy,
+        checkOutAt: null,
+        checkOutPhotoUrl: null,
       },
-      {
-        $set: {
-          branchId,
-          dateKey,
-          employeeId,
-
-          checkInAt: { $ifNull: ['$checkInAt', now] },
-
-          ...(photo.provided ? { checkInPhotoUrl: photo.value } : {}),
-          ...(notes.provided ? { notes: notes.value } : {}),
-        },
+      $set: {
+        branchId,
+        dateKey,
+        employeeId,
+        // checkInAt solo si está null
+        checkInAt: now,
+        ...(photo.provided ? { checkInPhotoUrl: photo.value } : {}),
+        ...(notes.provided ? { notes: notes.value } : {}),
       },
-    ];
+    };
 
+    // No pisar checkInAt si ya existe:
+    // usamos filtro checkInAt:null en el update principal;
+    // si ya existía, devolvemos el doc existente.
     const doc = await this.attendanceModel
-      .findOneAndUpdate({ branchId, dateKey, employeeId }, pipeline as any, {
-        upsert: true,
-        new: true,
-        updatePipeline: true,
-      })
+      .findOneAndUpdate(
+        { branchId, dateKey, employeeId, checkInAt: null },
+        update,
+        { upsert: true, new: true },
+      )
       .lean();
 
-    return this.toDTO(doc);
+    if (doc) return this.toDTO(doc);
+
+    const existing = await this.attendanceModel
+      .findOne({ branchId, dateKey, employeeId })
+      .lean();
+
+    return this.toDTO(existing);
   }
 
   async checkOut(input: {
@@ -266,11 +283,10 @@ export class AttendanceService {
     }
 
     // validación temporal (rara vez falla si now es "ahora", pero la dejo por seguridad)
-    if (
-      doc.checkInAt &&
-      now.getTime() < new Date(doc.checkInAt).getTime()
-    ) {
-      throw new BadRequestException('check-out no puede ser antes del check-in');
+    if (doc.checkInAt && now.getTime() < new Date(doc.checkInAt).getTime()) {
+      throw new BadRequestException(
+        'check-out no puede ser antes del check-in',
+      );
     }
 
     return this.toDTO(doc);
@@ -280,7 +296,11 @@ export class AttendanceService {
   // Admin update (manual)
   // ---------------------------------------------------------------------------
 
-  async update(params: { branchId: string; id: string; dto: UpdateAttendanceDto }) {
+  async update(params: {
+    branchId: string;
+    id: string;
+    dto: UpdateAttendanceDto;
+  }) {
     const branchId = toObjectId(params.branchId, 'branchId');
     const id = toObjectId(params.id, 'id');
 
@@ -290,7 +310,8 @@ export class AttendanceService {
     if ('checkInAt' in dto) patch.checkInAt = dto.checkInAt;
     if ('checkOutAt' in dto) patch.checkOutAt = dto.checkOutAt;
     if ('checkInPhotoUrl' in dto) patch.checkInPhotoUrl = dto.checkInPhotoUrl;
-    if ('checkOutPhotoUrl' in dto) patch.checkOutPhotoUrl = dto.checkOutPhotoUrl;
+    if ('checkOutPhotoUrl' in dto)
+      patch.checkOutPhotoUrl = dto.checkOutPhotoUrl;
     if ('notes' in dto) patch.notes = dto.notes;
 
     const doc = await this.attendanceModel
@@ -316,7 +337,8 @@ export class AttendanceService {
     const onlyActive = (q.onlyActive ?? 'true') === 'true';
 
     const employeeMatch: any = { branchId };
-    if (q.employeeId) employeeMatch._id = toObjectId(q.employeeId, 'employeeId');
+    if (q.employeeId)
+      employeeMatch._id = toObjectId(q.employeeId, 'employeeId');
     if (onlyActive) employeeMatch.isActive = true;
 
     const attendanceCol = this.attendanceCollectionName();
@@ -347,7 +369,9 @@ export class AttendanceService {
                 checkOutAt: { $ne: null },
               },
             },
-            { $addFields: { _ms: { $subtract: ['$checkOutAt', '$checkInAt'] } } },
+            {
+              $addFields: { _ms: { $subtract: ['$checkOutAt', '$checkInAt'] } },
+            },
             {
               $addFields: {
                 hours: {
@@ -373,7 +397,11 @@ export class AttendanceService {
         },
       },
 
-      { $addFields: { _agg: { $ifNull: [{ $arrayElemAt: ['$agg', 0] }, null] } } },
+      {
+        $addFields: {
+          _agg: { $ifNull: [{ $arrayElemAt: ['$agg', 0] }, null] },
+        },
+      },
       {
         $project: {
           _id: 1,

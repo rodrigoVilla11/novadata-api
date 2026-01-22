@@ -93,7 +93,7 @@ export class AuthService {
     return user;
   }
 
-  async login(email: string, password: string) {
+  async login(email: string, password: string, remember = false) {
     const user = await this.users.getUnsafeByEmail(email);
 
     if (!user) throw new UnauthorizedException('Invalid credentials');
@@ -120,7 +120,7 @@ export class AuthService {
 
     await this.users.setRefreshTokenHash(safeUser.id, refreshToken);
 
-    return { accessToken, refreshToken, user: safeUser };
+    return { accessToken, refreshToken, user: safeUser, remember };
   }
 
   async refresh(userId: string, refreshToken: string) {

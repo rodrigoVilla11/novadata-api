@@ -87,6 +87,7 @@ export class AttendanceController {
     const branchId = this.getBranchIdOrThrow(req);
     const createdByUserId = this.getUserId(req);
 
+    console.log('CheckInDto received:', dto);
     return this.attendanceService.checkIn({
       branchId,
       dateKey: dto.dateKey,

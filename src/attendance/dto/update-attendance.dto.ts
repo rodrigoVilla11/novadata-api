@@ -1,6 +1,9 @@
-import { IsOptional, IsString, IsDateString } from 'class-validator';
+import { IsOptional, IsString, IsDateString, IsMongoId } from 'class-validator';
 
 export class UpdateAttendanceDto {
+  @IsMongoId()
+  branchId: string;
+  
   @IsOptional()
   @IsDateString()
   checkInAt?: string | null;

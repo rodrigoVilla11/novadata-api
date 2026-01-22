@@ -3,7 +3,6 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
-  OnModuleInit,
   Logger,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -20,38 +19,26 @@ type Currency = 'ARS' | 'USD';
 type CreateOrUpdateProductInput = {
   name: string;
   description?: string | null;
-
-  // ❌ branchId ya NO viene acá
   supplierId?: string | null;
   categoryId?: string | null;
-
   sku?: string | null;
   barcode?: string | null;
-
   isSellable?: boolean;
   isProduced?: boolean;
-
   yieldQty: number;
   yieldUnit: Unit;
-
   portionSize?: number | null;
   portionLabel?: string | null;
-
   wastePct?: number; // 0..1
   extraCost?: number;
   packagingCost?: number;
-
   currency?: Currency;
-
   salePrice?: number | null;
   marginPct?: number | null;
-
   tags?: string[];
   allergens?: Allergen[];
-
   imageUrl?: string | null;
   galleryUrls?: string[];
-
   items: Array<{
     type: ProductItemType | 'INGREDIENT' | 'PREPARATION';
     ingredientId?: string | null;

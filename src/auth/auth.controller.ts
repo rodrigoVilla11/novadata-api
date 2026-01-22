@@ -14,17 +14,26 @@ import { AuthService } from './auth.service';
 export class AuthController {
   constructor(private auth: AuthService) {}
 
-  private setRefreshCookie(res: Response, token: string) {
+  private setRefreshCookie(res: Response, token: string, remember: boolean) {
     const isProd = process.env.NODE_ENV === 'production';
 
-    res.cookie('refresh_token', token, {
+    const base = {
       httpOnly: true,
-      secure: isProd ? true : false, // ✅ prod: true
-      sameSite: isProd ? 'none' : 'lax', // ✅ cross-site: none
+      secure: isProd ? true : false,
+      sameSite: isProd ? 'none' : 'lax',
       path: '/auth/refresh',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      // domain: ".tudominio.com", // ✅ opcional si querés compartir entre subdominios
-    });
+    } as const;
+
+    // ✅ remember=true => persistente
+    // ✅ remember=false => cookie de sesión (sin maxAge/expires)
+    const opts: any = { ...base };
+
+    if (remember) {
+      // ej: 30 días (ajustable)
+      opts.maxAge = 30 * 24 * 60 * 60 * 1000;
+    }
+
+    res.cookie('refresh_token', token, opts);
   }
 
   private clearRefreshCookie(res: Response) {
@@ -48,7 +57,7 @@ export class AuthController {
 
   @Post('login')
   async login(
-    @Body() body: { email: string; password: string },
+    @Body() body: { email: string; password: string; remember?: boolean },
     @Res({ passthrough: true }) res: Response,
   ) {
     const { accessToken, refreshToken, user } = await this.auth.login(
@@ -56,7 +65,7 @@ export class AuthController {
       body.password,
     );
 
-    this.setRefreshCookie(res, refreshToken);
+    this.setRefreshCookie(res, refreshToken, Boolean(body.remember));
 
     return { access_token: accessToken, user };
   }
@@ -78,7 +87,7 @@ export class AuthController {
       token,
     );
 
-    this.setRefreshCookie(res, refreshToken);
+    this.setRefreshCookie(res, refreshToken, false);
 
     return { access_token: accessToken, user };
   }
