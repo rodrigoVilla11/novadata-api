@@ -1,3 +1,4 @@
+// src/cash/cash.service.ts
 import {
   BadRequestException,
   ForbiddenException,
@@ -54,7 +55,7 @@ function assertDateKey(dateKey: string) {
   }
 }
 function oid(id: string, field: string) {
-  if (!Types.ObjectId.isValid(id))
+  if (!id || !Types.ObjectId.isValid(id))
     throw new BadRequestException(`${field} inválido`);
   return new Types.ObjectId(id);
 }
@@ -123,23 +124,47 @@ export class CashService {
   }
 
   // ============================
+  // Multi-tenant helpers
+  // ============================
+
+  private assertSameBranchOrAdmin(user: any, cashDay: any) {
+    if (hasRole(user, "ADMIN")) return;
+
+    const userBranchId = String(user?.branchId ?? "");
+    if (!userBranchId) throw new ForbiddenException("Missing branchId in token");
+
+    const dayBranchId = cashDay?.branchId ? String(cashDay.branchId) : "";
+    if (!dayBranchId) {
+      throw new ForbiddenException("CashDay sin branchId (dato inválido).");
+    }
+    if (userBranchId !== dayBranchId) {
+      throw new ForbiddenException("No podés operar otra sucursal.");
+    }
+  }
+
+  // ============================
   // Reglas / helpers FINANCE
   // ============================
 
   /**
    * Elegimos a qué FinanceAccount impacta cada método.
-   * Ideal: configurarlo en DB.
+   * Ideal: configurarlo en DB (por branch).
    */
-  private async resolveFinanceAccountIdForMethod(method: PaymentMethod) {
+  private async resolveFinanceAccountIdForMethod(
+    branchId: string,
+    method: PaymentMethod
+  ) {
+    // Nota: si tu FinanceAccountsService es multi-tenant, pasá branchId y filtrá.
+    // Si NO lo es, deberías implementarlo igual que Categories.
     const accounts = await this.accountsService.findAll({
+      branchId,
       active: true,
       includeDeleted: false,
     } as any);
 
     const byName = (name: string) =>
       accounts.find(
-        (a: any) =>
-          String(a.name || "").toLowerCase() === name.toLowerCase()
+        (a: any) => String(a.name || "").toLowerCase() === name.toLowerCase()
       );
 
     if (method === PaymentMethod.CASH) {
@@ -156,14 +181,22 @@ export class CashService {
 
   /**
    * Si el día está LOCKED en finance/closings, bloqueamos CASH también,
-   * excepto ADMIN.
+   * excepto ADMIN. (por branch)
    */
-  private async assertFinanceDayNotLocked(dateKey: string, user: any) {
-    const closing = await this.finClosingModel.findOne({ dateKey }).lean();
+  private async assertFinanceDayNotLocked(
+    dateKey: string,
+    branchId: string,
+    user: any
+  ) {
+    const closing = await this.finClosingModel
+      .findOne({ dateKey, branchId: oid(branchId, "branchId") } as any)
+      .lean();
+
     if (!closing) return;
+
     if (closing.status === "LOCKED" && !hasRole(user, "ADMIN")) {
       throw new BadRequestException(
-        `El día ${dateKey} está LOCKED en FINANCE. Solo ADMIN puede modificar caja.`
+        `El día ${dateKey} está LOCKED en FINANCE para esta sucursal. Solo ADMIN puede modificar caja.`
       );
     }
   }
@@ -172,9 +205,9 @@ export class CashService {
   // Day
   // ============================
 
-  async getDayByDateKey(dateKey: string, branchId?: string) {
+  async getDayByDateKey(dateKey: string, branchId: string) {
     assertDateKey(dateKey);
-    const bId = branchId ? oid(branchId, "branchId") : null;
+    const bId = oid(branchId, "branchId");
 
     const day = await this.cashDayModel
       .findOne({ dateKey, branchId: bId })
@@ -185,11 +218,11 @@ export class CashService {
     return this.toCashDayPublic(rec);
   }
 
-  async getOrCreateDay(user: any, dateKey: string, branchId?: string) {
+  async getOrCreateDay(user: any, dateKey: string, branchId: string) {
     assertDateKey(dateKey);
-    await this.assertFinanceDayNotLocked(dateKey, user);
+    await this.assertFinanceDayNotLocked(dateKey, branchId, user);
 
-    const bId = branchId ? oid(branchId, "branchId") : null;
+    const bId = oid(branchId, "branchId");
 
     const doc = await this.cashDayModel
       .findOneAndUpdate(
@@ -214,18 +247,18 @@ export class CashService {
     return this.toCashDayPublic(updated);
   }
 
-  async openDay(user: any, dto: OpenCashDayDto) {
+  async openDay(user: any, dto: OpenCashDayDto & { branchId: string }) {
     assertDateKey(dto.dateKey);
-    await this.assertFinanceDayNotLocked(dto.dateKey, user);
+    await this.assertFinanceDayNotLocked(dto.dateKey, dto.branchId, user);
 
-    const bId = dto.branchId ? oid(dto.branchId, "branchId") : null;
+    const bId = oid(dto.branchId, "branchId");
 
     const existing = await this.cashDayModel.findOne({
       dateKey: dto.dateKey,
       branchId: bId,
     });
 
-    const openingCash = Math.max(0, toMoney(dto.openingCash));
+    const openingCash = Math.max(0, toMoney((dto as any).openingCash));
 
     if (existing) {
       if (existing.status === CashDayStatus.CLOSED) {
@@ -263,15 +296,15 @@ export class CashService {
     return this.toCashDayPublic(rec);
   }
 
-  async closeDay(user: any, dto: CloseCashDayDto) {
+  async closeDay(user: any, dto: CloseCashDayDto & { branchId: string }) {
     assertDateKey(dto.dateKey);
 
     const userId = pickUserId(user);
     const isAdmin = hasRole(user, "ADMIN");
 
-    await this.assertFinanceDayNotLocked(dto.dateKey, user);
+    await this.assertFinanceDayNotLocked(dto.dateKey, dto.branchId, user);
 
-    const bId = dto.branchId ? oid(dto.branchId, "branchId") : null;
+    const bId = oid(dto.branchId, "branchId");
     const day = await this.cashDayModel.findOne({
       dateKey: dto.dateKey,
       branchId: bId,
@@ -287,11 +320,11 @@ export class CashService {
     const expectedCash = toMoney(rec.expectedCash);
 
     const countedCash =
-      dto.countedCash === undefined || dto.countedCash === null
+      (dto as any).countedCash === undefined || (dto as any).countedCash === null
         ? null
-        : Math.max(0, toMoney(dto.countedCash));
+        : Math.max(0, toMoney((dto as any).countedCash));
 
-    const wantsOverride = !!dto.adminOverride;
+    const wantsOverride = !!(dto as any).adminOverride;
     if ((countedCash === null || countedCash === 0) && !wantsOverride) {
       throw new BadRequestException(
         "Falta countedCash para cerrar. (o usar adminOverride)"
@@ -313,7 +346,7 @@ export class CashService {
           diffCash,
           closedAt: new Date(),
           closedByUserId: userId,
-          closeNote: (dto.note ?? "").trim(),
+          closeNote: String((dto as any).note ?? "").trim(),
         },
         { new: true }
       )
@@ -322,12 +355,12 @@ export class CashService {
     return this.toCashDayPublic(updated);
   }
 
-  async reopenDay(user: any, dateKey: string, branchId?: string, note?: string) {
+  async reopenDay(user: any, dateKey: string, branchId: string, note?: string) {
     assertDateKey(dateKey);
     if (!hasRole(user, "ADMIN"))
       throw new ForbiddenException("Solo ADMIN puede reabrir caja.");
 
-    const bId = branchId ? oid(branchId, "branchId") : null;
+    const bId = oid(branchId, "branchId");
     const day = await this.cashDayModel.findOne({ dateKey, branchId: bId });
     if (!day) throw new NotFoundException("Caja del día no encontrada.");
 
@@ -340,7 +373,7 @@ export class CashService {
           closedByUserId: null,
           countedCash: null,
           diffCash: 0,
-          closeNote: (note ?? "").trim(),
+          closeNote: String(note ?? "").trim(),
         },
         { new: true }
       )
@@ -354,9 +387,16 @@ export class CashService {
   // Movements
   // ============================
 
-  async listMovements(cashDayId: string) {
+  async listMovements(user: any, cashDayId: string) {
+    const cashDay = await this.cashDayModel
+      .findById(oid(cashDayId, "cashDayId"))
+      .lean();
+    if (!cashDay) throw new NotFoundException("Caja no encontrada.");
+
+    this.assertSameBranchOrAdmin(user, cashDay);
+
     const rows = await this.movModel
-      .find({ cashDayId: oid(cashDayId, "cashDayId") })
+      .find({ cashDayId: cashDay._id })
       .sort({ createdAt: -1 })
       .lean();
 
@@ -365,21 +405,28 @@ export class CashService {
 
   /**
    * ✅ Crea CashMovement + FinanceMovement espejo + recalc expectedCash
+   * (valida branch por CashDay)
    */
   async createMovement(user: any, dto: CreateMovementDto) {
     const cashDay = await this.cashDayModel.findById(
-      oid(dto.cashDayId, "cashDayId")
+      oid((dto as any).cashDayId, "cashDayId")
     );
     if (!cashDay) throw new NotFoundException("Caja no encontrada.");
     if (cashDay.status === CashDayStatus.CLOSED)
       throw new BadRequestException("La caja está cerrada.");
 
-    await this.assertFinanceDayNotLocked(cashDay.dateKey, user);
+    this.assertSameBranchOrAdmin(user, cashDay);
 
-    const amount = Math.max(0, toMoney(dto.amount));
+    const dayBranchId = String(cashDay.branchId ?? "");
+    if (!dayBranchId)
+      throw new BadRequestException("CashDay sin branchId (dato inválido).");
+
+    await this.assertFinanceDayNotLocked(cashDay.dateKey, dayBranchId, user);
+
+    const amount = Math.max(0, toMoney((dto as any).amount));
     if (amount <= 0) throw new BadRequestException("amount debe ser > 0");
 
-    const categoryId = dto.categoryId ? oid(dto.categoryId, "categoryId") : null;
+    const categoryId = (dto as any).categoryId ? oid((dto as any).categoryId, "categoryId") : null;
 
     const refType = (dto as any).refType ?? null;
     const refId = (dto as any).refId ?? null;
@@ -387,38 +434,42 @@ export class CashService {
     // 1) cash movement
     const cashMov = await this.movModel.create({
       cashDayId: cashDay._id,
-      type: dto.type,
-      method: dto.method,
+      type: (dto as any).type,
+      method: (dto as any).method,
       amount,
       categoryId,
-      concept: (dto.concept ?? "").trim(),
-      note: (dto.note ?? "").trim(),
+      concept: String((dto as any).concept ?? "").trim(),
+      note: String((dto as any).note ?? "").trim(),
       createdByUserId: pickUserId(user),
       refType,
       refId,
     });
 
     // 2) finance mirror
-    const finAccountId = await this.resolveFinanceAccountIdForMethod(dto.method);
+    const finAccountId = await this.resolveFinanceAccountIdForMethod(
+      dayBranchId,
+      (dto as any).method
+    );
     if (!finAccountId)
       throw new BadRequestException(
         "No hay FinanceAccount configurada para este método."
       );
 
     const finType =
-      dto.type === CashMovementType.INCOME ? FinType.INCOME : FinType.EXPENSE;
+      (dto as any).type === CashMovementType.INCOME ? FinType.INCOME : FinType.EXPENSE;
 
     const finDir =
-      dto.type === CashMovementType.INCOME ? FinDir.IN : FinDir.OUT;
+      (dto as any).type === CashMovementType.INCOME ? FinDir.IN : FinDir.OUT;
 
     await this.finMovModel.create({
+      branchId: oid(dayBranchId, "branchId"),
       dateKey: cashDay.dateKey,
       type: finType,
       direction: finDir,
       amount,
       accountId: oid(finAccountId, "accountId"),
       categoryId: categoryId ? categoryId : null,
-      notes: `[CASH] ${dto.method} - ${dto.concept ?? ""}`.trim(),
+      notes: `[CASH] ${(dto as any).method} - ${(dto as any).concept ?? ""}`.trim(),
       createdByUserId: oid(pickUserId(user), "userId"),
 
       // link
@@ -434,6 +485,7 @@ export class CashService {
 
   /**
    * ✅ Void CashMovement + void FinanceMovement espejo + recalc expectedCash
+   * (valida branch por CashDay)
    */
   async voidMovement(user: any, movementId: string, reason?: string) {
     const mov = await this.movModel.findById(oid(movementId, "movementId"));
@@ -442,11 +494,17 @@ export class CashService {
     const cashDay = await this.cashDayModel.findById(mov.cashDayId);
     if (!cashDay) throw new NotFoundException("Caja no encontrada.");
 
+    this.assertSameBranchOrAdmin(user, cashDay);
+
+    const dayBranchId = String(cashDay.branchId ?? "");
+    if (!dayBranchId)
+      throw new BadRequestException("CashDay sin branchId (dato inválido).");
+
     if (cashDay.status === CashDayStatus.CLOSED && !hasRole(user, "ADMIN")) {
       throw new BadRequestException("Caja cerrada: solo ADMIN puede anular.");
     }
 
-    await this.assertFinanceDayNotLocked(cashDay.dateKey, user);
+    await this.assertFinanceDayNotLocked(cashDay.dateKey, dayBranchId, user);
 
     const updated = await this.movModel
       .findByIdAndUpdate(
@@ -455,7 +513,7 @@ export class CashService {
           voided: true,
           voidedAt: new Date(),
           voidedByUserId: pickUserId(user),
-          voidReason: (reason ?? "").trim(),
+          voidReason: String(reason ?? "").trim(),
         },
         { new: true }
       )
@@ -465,9 +523,10 @@ export class CashService {
     await this.finMovModel.updateMany(
       {
         source: "CASH",
+        branchId: oid(dayBranchId, "branchId"),
         cashDayId: mov.cashDayId,
-        refType: mov.refType ?? null,
-        refId: mov.refId ?? null,
+        refType: (mov as any).refType ?? null,
+        refId: (mov as any).refId ?? null,
         amount: mov.amount,
         dateKey: cashDay.dateKey,
         status: { $ne: "VOID" },
@@ -533,7 +592,7 @@ export class CashService {
   // Summary
   // ============================
 
-  async getDaySummary(user: any, dateKey: string, branchId?: string) {
+  async getDaySummary(user: any, dateKey: string, branchId: string) {
     assertDateKey(dateKey);
 
     const dayPublic = await this.getOrCreateDay(user, dateKey, branchId);

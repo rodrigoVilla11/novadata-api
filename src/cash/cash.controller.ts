@@ -1,3 +1,4 @@
+// src/cash/cash.controller.ts
 import {
   Body,
   Controller,
@@ -8,6 +9,7 @@ import {
   Req,
   UseGuards,
   ForbiddenException,
+  UnauthorizedException,
 } from "@nestjs/common";
 import { AuthGuard } from "@nestjs/passport";
 import { Roles } from "src/auth/roles.decorator";
@@ -17,10 +19,34 @@ import { OpenCashDayDto } from "./dto/open-cash-day.dto";
 import { CloseCashDayDto } from "./dto/close-cash-day.dto";
 import { CreateMovementDto } from "./dto/create-movement.dto";
 
-function pickBranchId(req: any) {
-  // si tu JWT guarda branchId en payload (como venimos haciendo)
-  const b = req?.user?.branchId ?? null;
-  return b ? String(b) : null;
+/**
+ * Multi-tenant helpers (branchId)
+ * - branchId SIEMPRE viene del JWT para no-ADMIN
+ * - ADMIN puede pasar branchId en query/body; si no pasa, usa la del JWT
+ */
+function getUserBranchIdOrThrow(req: any) {
+  const branchId = req?.user?.branchId;
+  if (!branchId) throw new UnauthorizedException("Missing branchId in token");
+  return String(branchId);
+}
+
+function isAdmin(req: any) {
+  const roles = (req?.user?.roles ?? []).map((r: any) => String(r).toUpperCase());
+  return roles.includes("ADMIN");
+}
+
+function resolveBranchIdOrThrow(req: any, requested?: string) {
+  const userBranchId = getUserBranchIdOrThrow(req);
+
+  if (isAdmin(req)) {
+    return String(requested ?? userBranchId);
+  }
+
+  if (requested && requested !== userBranchId) {
+    throw new ForbiddenException("No podés operar otra sucursal.");
+  }
+
+  return userBranchId;
 }
 
 @Controller("cash")
@@ -35,8 +61,8 @@ export class CashController {
 
   /**
    * GET /cash/day?dateKey=YYYY-MM-DD&branchId=...
-   * ✅ Recomendación multi-branch: si el user tiene branchId y NO es ADMIN,
-   * ignoramos branchId del query y usamos la branch del user.
+   * - ADMIN puede consultar otra branch
+   * - NO ADMIN siempre usa branch del JWT
    */
   @Get("day")
   async getDay(
@@ -44,21 +70,7 @@ export class CashController {
     @Query("dateKey") dateKey: string,
     @Query("branchId") branchId?: string
   ) {
-    const userBranchId = pickBranchId(req);
-
-    // si querés forzar SIEMPRE branch por JWT (más seguro):
-    // const effectiveBranchId = userBranchId;
-    //
-    // si querés permitir que ADMIN consulte otra branch:
-    const roles = (req?.user?.roles ?? []).map((r: any) =>
-      String(r).toUpperCase()
-    );
-    const isAdmin = roles.includes("ADMIN");
-
-    const effectiveBranchId = isAdmin
-      ? branchId ?? userBranchId ?? undefined
-      : userBranchId ?? undefined;
-
+    const effectiveBranchId = resolveBranchIdOrThrow(req, branchId);
     return this.cashService.getDayByDateKey(dateKey, effectiveBranchId);
   }
 
@@ -71,62 +83,28 @@ export class CashController {
     @Req() req: any,
     @Body() body: { dateKey: string; branchId?: string }
   ) {
-    const userBranchId = pickBranchId(req);
-
-    const roles = (req?.user?.roles ?? []).map((r: any) =>
-      String(r).toUpperCase()
-    );
-    const isAdmin = roles.includes("ADMIN");
-
-    const effectiveBranchId = isAdmin
-      ? body.branchId ?? userBranchId ?? undefined
-      : userBranchId ?? undefined;
-
-    if (!isAdmin && body.branchId && userBranchId && body.branchId !== userBranchId) {
-      throw new ForbiddenException("No podés operar otra sucursal.");
-    }
-
+    const effectiveBranchId = resolveBranchIdOrThrow(req, body?.branchId);
     return this.cashService.getOrCreateDay(req.user, body.dateKey, effectiveBranchId);
   }
 
   // POST /cash/day/open
   @Post("day/open")
   async openDay(@Req() req: any, @Body() dto: OpenCashDayDto) {
-    const userBranchId = pickBranchId(req);
-    const roles = (req?.user?.roles ?? []).map((r: any) =>
-      String(r).toUpperCase()
-    );
-    const isAdmin = roles.includes("ADMIN");
-
-    const effectiveBranchId = isAdmin
-      ? dto.branchId ?? userBranchId ?? undefined
-      : userBranchId ?? undefined;
-
-    if (!isAdmin && dto.branchId && userBranchId && dto.branchId !== userBranchId) {
-      throw new ForbiddenException("No podés operar otra sucursal.");
-    }
-
-    return this.cashService.openDay(req.user, { ...dto, branchId: effectiveBranchId } as any);
+    const effectiveBranchId = resolveBranchIdOrThrow(req, (dto as any)?.branchId);
+    return this.cashService.openDay(req.user, {
+      ...(dto as any),
+      branchId: effectiveBranchId,
+    });
   }
 
   // POST /cash/day/close
   @Post("day/close")
   async closeDay(@Req() req: any, @Body() dto: CloseCashDayDto) {
-    const userBranchId = pickBranchId(req);
-    const roles = (req?.user?.roles ?? []).map((r: any) =>
-      String(r).toUpperCase()
-    );
-    const isAdmin = roles.includes("ADMIN");
-
-    const effectiveBranchId = isAdmin
-      ? dto.branchId ?? userBranchId ?? undefined
-      : userBranchId ?? undefined;
-
-    if (!isAdmin && dto.branchId && userBranchId && dto.branchId !== userBranchId) {
-      throw new ForbiddenException("No podés operar otra sucursal.");
-    }
-
-    return this.cashService.closeDay(req.user, { ...dto, branchId: effectiveBranchId } as any);
+    const effectiveBranchId = resolveBranchIdOrThrow(req, (dto as any)?.branchId);
+    return this.cashService.closeDay(req.user, {
+      ...(dto as any),
+      branchId: effectiveBranchId,
+    });
   }
 
   // POST /cash/day/reopen?dateKey=...&branchId=...&note=...
@@ -138,9 +116,8 @@ export class CashController {
     @Query("branchId") branchId?: string,
     @Query("note") note?: string
   ) {
-    const userBranchId = pickBranchId(req);
-    const effectiveBranchId = branchId ?? userBranchId ?? undefined;
-
+    // ADMIN: si no manda branchId, usamos la suya del JWT
+    const effectiveBranchId = resolveBranchIdOrThrow(req, branchId);
     return this.cashService.reopenDay(req.user, dateKey, effectiveBranchId, note);
   }
 
@@ -151,17 +128,7 @@ export class CashController {
     @Query("dateKey") dateKey: string,
     @Query("branchId") branchId?: string
   ) {
-    const userBranchId = pickBranchId(req);
-
-    const roles = (req?.user?.roles ?? []).map((r: any) =>
-      String(r).toUpperCase()
-    );
-    const isAdmin = roles.includes("ADMIN");
-
-    const effectiveBranchId = isAdmin
-      ? branchId ?? userBranchId ?? undefined
-      : userBranchId ?? undefined;
-
+    const effectiveBranchId = resolveBranchIdOrThrow(req, branchId);
     return this.cashService.getDaySummary(req.user, dateKey, effectiveBranchId);
   }
 
@@ -171,17 +138,13 @@ export class CashController {
 
   // GET /cash/movements/:cashDayId
   @Get("movements/:cashDayId")
-  async listMovements(@Param("cashDayId") cashDayId: string) {
-    return this.cashService.listMovements(cashDayId);
+  async listMovements(@Req() req: any, @Param("cashDayId") cashDayId: string) {
+    return this.cashService.listMovements(req.user, cashDayId);
   }
 
   // POST /cash/movement
   @Post("movement")
   async createMovement(@Req() req: any, @Body() dto: CreateMovementDto) {
-    // Nota: acá no pasamos branchId porque el CashDayId ya “ata” sucursal.
-    // La seguridad real la tenés que hacer en el service:
-    // - buscar cashDay por id
-    // - comparar cashDay.branchId con req.user.branchId (si no es ADMIN)
     return this.cashService.createMovement(req.user, dto);
   }
 

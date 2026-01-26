@@ -80,7 +80,10 @@ export class SalesService {
       note: it.note ?? null,
     }));
 
-    const subtotal = items.reduce((acc: number, x: any) => acc + money(x.lineTotal), 0);
+    const subtotal = items.reduce(
+      (acc: number, x: any) => acc + money(x.lineTotal),
+      0,
+    );
     const total = subtotal;
 
     const sale = await this.saleModel.create({
@@ -109,12 +112,15 @@ export class SalesService {
   // Read
   // ============================
 
-  async findAll(branchId: string, params?: {
-    status?: SaleStatus;
-    from?: string; // ISO
-    to?: string; // ISO
-    limit?: number;
-  }) {
+  async findAll(
+    branchId: string,
+    params?: {
+      status?: SaleStatus;
+      from?: string; // ISO
+      to?: string; // ISO
+      limit?: number;
+    },
+  ) {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
 
     const filter: any = { branchId: branchObjId };
@@ -161,17 +167,9 @@ export class SalesService {
     return this.toDto(doc);
   }
 
-  // ============================
-  // Pay (cash + stock)
-  // ============================
+  // ✅ PEGAR ESTO dentro de SalesService.pay()
+  // Objetivo: ver por qué aparece "branchId inválido" (casi seguro viene de CashService o StockService)
 
-  /**
-   * Cobra una venta.
-   * - Crea movimientos INCOME en Cash
-   * - Descuenta stock (StockService)
-   *
-   * Requiere dateKey (YYYY-MM-DD) para imputar en caja del día.
-   */
   async pay(
     user: any,
     branchId: string,
@@ -188,6 +186,42 @@ export class SalesService {
       categoryId?: string | null;
     },
   ) {
+    // ---------------- DEBUG START ----------------
+    // eslint-disable-next-line no-console
+    console.log('======== [SalesService.pay] START ========');
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] user:', {
+      id: pickUserId(user),
+      branchId: user?.branchId ?? user?.branch_id ?? null,
+      roles: user?.roles ?? null,
+      email: user?.email ?? null,
+    });
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] branchId arg:', branchId);
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] saleId arg:', saleId);
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] dto:', {
+      dateKey: dto?.dateKey,
+      paymentsCount: Array.isArray(dto?.payments) ? dto.payments.length : null,
+      payments: dto?.payments,
+      concept: dto?.concept,
+      note: dto?.note,
+      categoryId: dto?.categoryId,
+    });
+
+    // eslint-disable-next-line no-console
+    console.log(
+      '[SalesService.pay] Types.ObjectId.isValid(branchId):',
+      Types.ObjectId.isValid(String(branchId)),
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      '[SalesService.pay] Types.ObjectId.isValid(saleId):',
+      Types.ObjectId.isValid(String(saleId)),
+    );
+    // ---------------- DEBUG END ----------------
+
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const saleObjId = this.oidOrThrow(saleId, 'saleId');
 
@@ -197,13 +231,49 @@ export class SalesService {
     }
 
     // 0) leer venta (con branch)
-    const sale0 = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId }).lean();
+    const sale0 = await this.saleModel
+      .findOne({ _id: saleObjId, branchId: branchObjId })
+      .lean();
+
+    // ---------------- DEBUG START ----------------
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] sale0 found:', !!sale0);
+    // eslint-disable-next-line no-console
+    console.log(
+      '[SalesService.pay] sale0 summary:',
+      sale0
+        ? {
+            _id: String((sale0 as any)._id),
+            branchId: (sale0 as any).branchId
+              ? String((sale0 as any).branchId)
+              : null,
+            status: (sale0 as any).status,
+            total: (sale0 as any).total,
+            voided: (sale0 as any).voided,
+            orderId: (sale0 as any).orderId
+              ? String((sale0 as any).orderId)
+              : null,
+          }
+        : null,
+    );
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] compare branch:', {
+      branchIdArg: String(branchId),
+      branchIdObj: String(branchObjId),
+      saleBranch: sale0 ? String((sale0 as any).branchId) : null,
+      matches: sale0
+        ? String((sale0 as any).branchId) === String(branchObjId)
+        : null,
+    });
+    // ---------------- DEBUG END ----------------
+
     if (!sale0) throw new NotFoundException('Sale not found');
 
     if (sale0.status === SaleStatus.VOIDED || (sale0 as any).voided) {
       throw new BadRequestException('Sale is VOIDED');
     }
-    if (!(sale0 as any).items?.length) throw new BadRequestException('Sale has no items');
+    if (!(sale0 as any).items?.length)
+      throw new BadRequestException('Sale has no items');
 
     const total = money((sale0 as any).total);
 
@@ -215,7 +285,15 @@ export class SalesService {
       }))
       .filter((p) => p.amount > 0);
 
-    if (!payments.length) throw new BadRequestException('payments total must be > 0');
+    // ---------------- DEBUG START ----------------
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] normalized payments:', payments);
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] sale total:', total);
+    // ---------------- DEBUG END ----------------
+
+    if (!payments.length)
+      throw new BadRequestException('payments total must be > 0');
 
     const paidTotal = payments.reduce((acc, p) => acc + money(p.amount), 0);
 
@@ -225,13 +303,13 @@ export class SalesService {
       );
     }
 
-    // 1) idempotencia: si ya está PAID, devolvemos
     if (sale0.status === SaleStatus.PAID) {
-      const already = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId }).lean();
+      const already = await this.saleModel
+        .findOne({ _id: saleObjId, branchId: branchObjId })
+        .lean();
       return this.toDto(already);
     }
 
-    // 2) lock optimista: sólo DRAFT en este branch
     const locked = await this.saleModel.findOneAndUpdate(
       {
         _id: saleObjId,
@@ -250,66 +328,160 @@ export class SalesService {
       { new: true },
     );
 
+    // ---------------- DEBUG START ----------------
+    // eslint-disable-next-line no-console
+    console.log('[SalesService.pay] locked updated:', !!locked);
+    // eslint-disable-next-line no-console
+    console.log(
+      '[SalesService.pay] locked status:',
+      locked?.status,
+      'paidDateKey:',
+      (locked as any)?.paidDateKey,
+    );
+    // ---------------- DEBUG END ----------------
+
     if (!locked) {
-      const cur = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId }).lean();
+      const cur = await this.saleModel
+        .findOne({ _id: saleObjId, branchId: branchObjId })
+        .lean();
       if (!cur) throw new NotFoundException('Sale not found');
       if (cur.status === SaleStatus.PAID) return this.toDto(cur);
       throw new BadRequestException(`Sale status is ${cur.status}, cannot pay`);
     }
 
-    // 3) caja del día (✅ ideal: tu CashDay debe ser por branch)
-    // Si tu firma es getOrCreateDay(user, dateKey, branchId) => pasalo acá.
-    const day = await this.cashService.getOrCreateDay(
-      user,
-      dto.dateKey,
-      branchId, // 👈 importante: si tu cash ya es multi-branch
-    );
+    // 3) caja del día
+    // ---------------- DEBUG START ----------------
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[SalesService.pay] calling cashService.getOrCreateDay...', {
+        dateKey: dto.dateKey,
+        branchId,
+      });
+      // ---------------- DEBUG END ----------------
 
-    // 4) movimientos de caja
-    const conceptBase = (dto.concept ?? 'VENTA').trim() || 'VENTA';
-    const saleLabel = `Sale ${String(locked._id)}`;
+      const day = await this.cashService.getOrCreateDay(
+        user,
+        dto.dateKey,
+        branchId,
+      );
 
-    for (const p of payments) {
-      await this.cashService.createMovement(user, {
-        cashDayId: day.id,
-        type: CashMovementType.INCOME,
-        method: p.method,
-        amount: p.amount,
-        categoryId: dto.categoryId ?? null,
-        concept: conceptBase,
-        note: `${saleLabel}${p.note ? ` - ${p.note}` : ''}`,
-        refType: 'SALE',
-        refId: String(locked._id),
-        branchId, // 👈 si tu CashMovement tiene branchId, pasalo
-      } as any);
+      // ---------------- DEBUG START ----------------
+      // eslint-disable-next-line no-console
+      console.log('[SalesService.pay] cash day OK:', day);
+      // ---------------- DEBUG END ----------------
+
+      const conceptBase = (dto.concept ?? 'VENTA').trim() || 'VENTA';
+      const saleLabel = `Sale ${String(locked._id)}`;
+
+      for (const p of payments) {
+        // ---------------- DEBUG START ----------------
+        // eslint-disable-next-line no-console
+        console.log('[SalesService.pay] cash movement:', {
+          cashDayId: day?.id,
+          method: p.method,
+          amount: p.amount,
+          branchId,
+        });
+        // ---------------- DEBUG END ----------------
+
+        await this.cashService.createMovement(user, {
+          cashDayId: day.id,
+          type: CashMovementType.INCOME,
+          method: p.method,
+          amount: p.amount,
+          categoryId: dto.categoryId ?? null,
+          concept: conceptBase,
+          note: `${saleLabel}${p.note ? ` - ${p.note}` : ''}`,
+          refType: 'SALE',
+          refId: String(locked._id),
+          branchId,
+        } as any);
+      }
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.log(
+        '!!!! [SalesService.pay] CASH ERROR !!!!',
+        e?.message,
+        e?.stack,
+      );
+      // revert status to DRAFT to avoid paid-without-cash
+      await this.saleModel.updateOne(
+        { _id: saleObjId, branchId: branchObjId },
+        {
+          $set: {
+            status: SaleStatus.DRAFT,
+            paidAt: null,
+            paidByUserId: null,
+            paidDateKey: null,
+          },
+        },
+      );
+      throw e;
     }
 
-    // 5) stock (✅ ahora con branchId)
-    await this.stockService.applySale({
-      branchId,
-      dateKey: dto.dateKey,
-      saleId: String(sale0._id),
-      userId: pickUserId(user) ? String(pickUserId(user)) : null,
-      note: dto.note ?? null,
-      lines: (sale0.items ?? []).map((it: any) => ({
-        productId: String(it.productId),
-        qty: Number(it.qty ?? 0),
-      })),
-    } as any);
+    // 5) stock
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[SalesService.pay] calling stockService.applySale...', {
+        branchId,
+        dateKey: dto.dateKey,
+        saleId: String(sale0._id),
+        userId: pickUserId(user) ? String(pickUserId(user)) : null,
+      });
 
-    // 6) completar payments/paidTotal/note (ya está PAID)
+      await this.stockService.applySale({
+        branchId,
+        dateKey: dto.dateKey,
+        saleId: String(sale0._id),
+        userId: pickUserId(user) ? String(pickUserId(user)) : null,
+        note: dto.note ?? null,
+        lines: (sale0.items ?? []).map((it: any) => ({
+          productId: String(it.productId),
+          qty: Number(it.qty ?? 0),
+        })),
+      } as any);
+
+      // eslint-disable-next-line no-console
+      console.log('[SalesService.pay] stock OK');
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.log(
+        '!!!! [SalesService.pay] STOCK ERROR !!!!',
+        e?.message,
+        e?.stack,
+      );
+      // optional: revert sale to DRAFT
+      await this.saleModel.updateOne(
+        { _id: saleObjId, branchId: branchObjId },
+        {
+          $set: {
+            status: SaleStatus.DRAFT,
+            paidAt: null,
+            paidByUserId: null,
+            paidDateKey: null,
+          },
+        },
+      );
+      throw e;
+    }
+
+    // 6) completar payments/paidTotal/note
     const updated = await this.saleModel.findOneAndUpdate(
       { _id: saleObjId, branchId: branchObjId },
       {
         $set: {
           payments: payments as any,
           paidTotal,
-          note: dto.note ? String(dto.note).trim() : ((sale0 as any).note ?? null),
+          note: dto.note
+            ? String(dto.note).trim()
+            : ((sale0 as any).note ?? null),
         },
       },
       { new: true },
     );
 
+    // eslint-disable-next-line no-console
+    console.log('======== [SalesService.pay] DONE ========');
     return this.toDto(updated);
   }
 
@@ -327,7 +499,10 @@ export class SalesService {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const saleObjId = this.oidOrThrow(saleId, 'saleId');
 
-    const sale = await this.saleModel.findOne({ _id: saleObjId, branchId: branchObjId });
+    const sale = await this.saleModel.findOne({
+      _id: saleObjId,
+      branchId: branchObjId,
+    });
     if (!sale) throw new NotFoundException('Sale not found');
 
     if (sale.status === SaleStatus.VOIDED || sale.voided) {
@@ -337,7 +512,9 @@ export class SalesService {
     if (sale.status === SaleStatus.PAID) {
       const dateKey = overrideDateKey ?? (sale as any).paidDateKey;
       if (!dateKey) {
-        throw new BadRequestException('paidDateKey missing: provide overrideDateKey');
+        throw new BadRequestException(
+          'paidDateKey missing: provide overrideDateKey',
+        );
       }
 
       // caja mismo día / mismo branch

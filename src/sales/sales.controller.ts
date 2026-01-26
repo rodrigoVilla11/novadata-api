@@ -18,10 +18,30 @@ import { PaymentMethod } from 'src/cash/schemas/cash-movement.schema';
 import { SalesService } from './sales.service';
 
 function getBranchIdOrThrow(req: any) {
-  const branchId = req?.user?.branchId ?? null; // viene del JWT payload
+  const u = req?.user ?? null;
+
+  const branchId =
+    u?.branchId ?? u?.branch_id ?? u?.branch?.id ?? u?.branch?.id ?? null;
+
+  // DEBUG (temporal)
+  // eslint-disable-next-line no-console
+  console.log('[Sales] req.user keys:', u ? Object.keys(u) : null);
+  // eslint-disable-next-line no-console
+  console.log('[Sales] req.user:', u);
+
   if (!branchId || String(branchId).trim() === '') {
-    throw new BadRequestException('branchId is required (missing in req.user)');
+    // eslint-disable-next-line no-console
+    console.log(
+      '[Sales] Missing branchId. auth header:',
+      req?.headers?.authorization,
+    );
+
+    throw new BadRequestException(
+      'branchId inválido (missing/empty in req.user). ' +
+        'Expected req.user.branchId (JWT payload).',
+    );
   }
+
   return String(branchId);
 }
 
