@@ -67,6 +67,12 @@ export class Order {
   @Prop({ type: String, required: true, index: true })
   source: OrderSource;
 
+  @Prop({ type: String, required: true, index: true })
+  dateKey: string; // "YYYY-MM-DD"
+
+  @Prop({ type: Number, required: true, index: true })
+  dayNumber: number; // 1..N del día
+
   @Prop({
     type: String,
     enum: OrderFulfillment,
@@ -113,3 +119,4 @@ OrderSchema.index({ branchId: 1, createdAt: -1 });
 OrderSchema.index({ branchId: 1, status: 1, createdAt: -1 });
 OrderSchema.index({ branchId: 1, source: 1, createdAt: -1 });
 OrderSchema.index({ branchId: 1, fulfillment: 1, createdAt: -1 });
+OrderSchema.index({ branchId: 1, dateKey: 1, dayNumber: 1 }, { unique: true });

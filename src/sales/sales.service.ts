@@ -112,22 +112,42 @@ export class SalesService {
   // Read
   // ============================
 
+  // SalesService.findAll
   async findAll(
     branchId: string,
     params?: {
       status?: SaleStatus;
-      from?: string; // ISO
-      to?: string; // ISO
+      from?: string;
+      to?: string;
+      dateKey?: string; // ✅ nuevo
       limit?: number;
     },
   ) {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
-
     const filter: any = { branchId: branchObjId };
 
     if (params?.status) filter.status = params.status;
 
-    if (params?.from || params?.to) {
+    // ✅ NUEVO: dateKey (YYYY-MM-DD)
+    if (params?.dateKey) {
+      const dk = String(params.dateKey).trim();
+
+      // rango del día en hora Argentina
+      const fromDay = new Date(`${dk}T00:00:00-03:00`);
+      const toDay = new Date(`${dk}T23:59:59.999-03:00`);
+
+      // Si piden PAID, lo más correcto es paidDateKey
+      if (params.status === SaleStatus.PAID) {
+        filter.paidDateKey = dk;
+      } else {
+        // "Ventas del día" = pagadas ese día OR creadas ese día
+        filter.$or = [
+          { paidDateKey: dk },
+          { createdAt: { $gte: fromDay, $lte: toDay } },
+        ];
+      }
+    } else if (params?.from || params?.to) {
+      // tu filtro existente por createdAt
       filter.createdAt = {};
       if (params.from) filter.createdAt.$gte = new Date(params.from);
       if (params.to) filter.createdAt.$lte = new Date(params.to);
@@ -141,7 +161,17 @@ export class SalesService {
       .limit(limit)
       .lean();
 
-    return rows.map((x: any) => this.toDto(x));
+    return (rows ?? []).map((s: any) => ({
+      id: String(s.id ?? s._id),
+      orderId: String(s.orderId ?? s.order_id ?? ''),
+      status: s.status,
+      total: num(s.total),
+      paidTotal: num(s.paidTotal),
+      change: num(s.change),
+      payments: s.payments ?? [],
+      paidDateKey: s.paidDateKey ?? null,
+      createdAt: s.createdAt ?? s.created_at ?? new Date().toISOString(),
+    }));
   }
 
   async findByOrderId(branchId: string, orderId: string) {
@@ -167,8 +197,9 @@ export class SalesService {
     return this.toDto(doc);
   }
 
-  // ✅ PEGAR ESTO dentro de SalesService.pay()
-  // Objetivo: ver por qué aparece "branchId inválido" (casi seguro viene de CashService o StockService)
+  // ============================
+  // Pay
+  // ============================
 
   async pay(
     user: any,
@@ -186,42 +217,6 @@ export class SalesService {
       categoryId?: string | null;
     },
   ) {
-    // ---------------- DEBUG START ----------------
-    // eslint-disable-next-line no-console
-    console.log('======== [SalesService.pay] START ========');
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] user:', {
-      id: pickUserId(user),
-      branchId: user?.branchId ?? user?.branch_id ?? null,
-      roles: user?.roles ?? null,
-      email: user?.email ?? null,
-    });
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] branchId arg:', branchId);
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] saleId arg:', saleId);
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] dto:', {
-      dateKey: dto?.dateKey,
-      paymentsCount: Array.isArray(dto?.payments) ? dto.payments.length : null,
-      payments: dto?.payments,
-      concept: dto?.concept,
-      note: dto?.note,
-      categoryId: dto?.categoryId,
-    });
-
-    // eslint-disable-next-line no-console
-    console.log(
-      '[SalesService.pay] Types.ObjectId.isValid(branchId):',
-      Types.ObjectId.isValid(String(branchId)),
-    );
-    // eslint-disable-next-line no-console
-    console.log(
-      '[SalesService.pay] Types.ObjectId.isValid(saleId):',
-      Types.ObjectId.isValid(String(saleId)),
-    );
-    // ---------------- DEBUG END ----------------
-
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const saleObjId = this.oidOrThrow(saleId, 'saleId');
 
@@ -234,38 +229,6 @@ export class SalesService {
     const sale0 = await this.saleModel
       .findOne({ _id: saleObjId, branchId: branchObjId })
       .lean();
-
-    // ---------------- DEBUG START ----------------
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] sale0 found:', !!sale0);
-    // eslint-disable-next-line no-console
-    console.log(
-      '[SalesService.pay] sale0 summary:',
-      sale0
-        ? {
-            _id: String((sale0 as any)._id),
-            branchId: (sale0 as any).branchId
-              ? String((sale0 as any).branchId)
-              : null,
-            status: (sale0 as any).status,
-            total: (sale0 as any).total,
-            voided: (sale0 as any).voided,
-            orderId: (sale0 as any).orderId
-              ? String((sale0 as any).orderId)
-              : null,
-          }
-        : null,
-    );
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] compare branch:', {
-      branchIdArg: String(branchId),
-      branchIdObj: String(branchObjId),
-      saleBranch: sale0 ? String((sale0 as any).branchId) : null,
-      matches: sale0
-        ? String((sale0 as any).branchId) === String(branchObjId)
-        : null,
-    });
-    // ---------------- DEBUG END ----------------
 
     if (!sale0) throw new NotFoundException('Sale not found');
 
@@ -285,23 +248,18 @@ export class SalesService {
       }))
       .filter((p) => p.amount > 0);
 
-    // ---------------- DEBUG START ----------------
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] normalized payments:', payments);
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] sale total:', total);
-    // ---------------- DEBUG END ----------------
-
     if (!payments.length)
       throw new BadRequestException('payments total must be > 0');
 
     const paidTotal = payments.reduce((acc, p) => acc + money(p.amount), 0);
 
-    if (Math.abs(paidTotal - total) > 0.000001) {
+    if (paidTotal + 0.000001 < total) {
       throw new BadRequestException(
-        `Paid total (${paidTotal}) must equal sale total (${total})`,
+        `Paid total (${paidTotal}) must be >= sale total (${total})`,
       );
     }
+
+    const change = money(paidTotal - total); // vuelto
 
     if (sale0.status === SaleStatus.PAID) {
       const already = await this.saleModel
@@ -310,6 +268,7 @@ export class SalesService {
       return this.toDto(already);
     }
 
+    // 1) lock: pasar a PAID (si estaba DRAFT)
     const locked = await this.saleModel.findOneAndUpdate(
       {
         _id: saleObjId,
@@ -328,18 +287,6 @@ export class SalesService {
       { new: true },
     );
 
-    // ---------------- DEBUG START ----------------
-    // eslint-disable-next-line no-console
-    console.log('[SalesService.pay] locked updated:', !!locked);
-    // eslint-disable-next-line no-console
-    console.log(
-      '[SalesService.pay] locked status:',
-      locked?.status,
-      'paidDateKey:',
-      (locked as any)?.paidDateKey,
-    );
-    // ---------------- DEBUG END ----------------
-
     if (!locked) {
       const cur = await this.saleModel
         .findOne({ _id: saleObjId, branchId: branchObjId })
@@ -349,41 +296,18 @@ export class SalesService {
       throw new BadRequestException(`Sale status is ${cur.status}, cannot pay`);
     }
 
-    // 3) caja del día
-    // ---------------- DEBUG START ----------------
+    // 2) caja del día + movimientos
     try {
-      // eslint-disable-next-line no-console
-      console.log('[SalesService.pay] calling cashService.getOrCreateDay...', {
-        dateKey: dto.dateKey,
-        branchId,
-      });
-      // ---------------- DEBUG END ----------------
-
       const day = await this.cashService.getOrCreateDay(
         user,
         dto.dateKey,
         branchId,
       );
 
-      // ---------------- DEBUG START ----------------
-      // eslint-disable-next-line no-console
-      console.log('[SalesService.pay] cash day OK:', day);
-      // ---------------- DEBUG END ----------------
-
       const conceptBase = (dto.concept ?? 'VENTA').trim() || 'VENTA';
       const saleLabel = `Sale ${String(locked._id)}`;
 
       for (const p of payments) {
-        // ---------------- DEBUG START ----------------
-        // eslint-disable-next-line no-console
-        console.log('[SalesService.pay] cash movement:', {
-          cashDayId: day?.id,
-          method: p.method,
-          amount: p.amount,
-          branchId,
-        });
-        // ---------------- DEBUG END ----------------
-
         await this.cashService.createMovement(user, {
           cashDayId: day.id,
           type: CashMovementType.INCOME,
@@ -398,12 +322,6 @@ export class SalesService {
         } as any);
       }
     } catch (e: any) {
-      // eslint-disable-next-line no-console
-      console.log(
-        '!!!! [SalesService.pay] CASH ERROR !!!!',
-        e?.message,
-        e?.stack,
-      );
       // revert status to DRAFT to avoid paid-without-cash
       await this.saleModel.updateOne(
         { _id: saleObjId, branchId: branchObjId },
@@ -419,17 +337,9 @@ export class SalesService {
       throw e;
     }
 
-    // 5) stock
+    // 3) stock (✅ permite negativo pero devuelve warnings)
     try {
-      // eslint-disable-next-line no-console
-      console.log('[SalesService.pay] calling stockService.applySale...', {
-        branchId,
-        dateKey: dto.dateKey,
-        saleId: String(sale0._id),
-        userId: pickUserId(user) ? String(pickUserId(user)) : null,
-      });
-
-      await this.stockService.applySale({
+      const stockRes = await this.stockService.applySale({
         branchId,
         dateKey: dto.dateKey,
         saleId: String(sale0._id),
@@ -441,16 +351,20 @@ export class SalesService {
         })),
       } as any);
 
-      // eslint-disable-next-line no-console
-      console.log('[SalesService.pay] stock OK');
+      if (stockRes.negativeLines?.length) {
+        // opcional: persistir para UI/reportes
+        await this.saleModel.updateOne(
+          { _id: saleObjId, branchId: branchObjId },
+          {
+            $set: {
+              hasNegativeStock: true,
+              negativeStockLines: stockRes.negativeLines,
+            },
+          } as any,
+        );
+      }
     } catch (e: any) {
-      // eslint-disable-next-line no-console
-      console.log(
-        '!!!! [SalesService.pay] STOCK ERROR !!!!',
-        e?.message,
-        e?.stack,
-      );
-      // optional: revert sale to DRAFT
+      // revert a DRAFT si falla stock por cualquier motivo (no warnings)
       await this.saleModel.updateOne(
         { _id: saleObjId, branchId: branchObjId },
         {
@@ -465,13 +379,14 @@ export class SalesService {
       throw e;
     }
 
-    // 6) completar payments/paidTotal/note
+    // 4) completar payments/paidTotal/note
     const updated = await this.saleModel.findOneAndUpdate(
       { _id: saleObjId, branchId: branchObjId },
       {
         $set: {
           payments: payments as any,
           paidTotal,
+          change, // ✅ nuevo campo (agregalo al schema)
           note: dto.note
             ? String(dto.note).trim()
             : ((sale0 as any).note ?? null),
@@ -480,8 +395,6 @@ export class SalesService {
       { new: true },
     );
 
-    // eslint-disable-next-line no-console
-    console.log('======== [SalesService.pay] DONE ========');
     return this.toDto(updated);
   }
 
@@ -583,21 +496,17 @@ export class SalesService {
       subtotal: num(doc.subtotal),
       total: num(doc.total),
 
-      items: (doc.items ?? []).map((it: any) => ({
-        productId: it.productId ? String(it.productId) : null,
-        qty: num(it.qty),
-        unitPrice: num(it.unitPrice),
-        lineTotal: num(it.lineTotal),
-        note: it.note ?? null,
-      })),
-
+      // ✅ IMPORTANTE: pagos y totales pagados
       payments: (doc.payments ?? []).map((p: any) => ({
         method: p.method,
         amount: num(p.amount),
         note: p.note ?? null,
       })),
-
       paidTotal: num(doc.paidTotal),
+
+      // ✅ CAMBIO (lo que implementaste)
+      change: num((doc as any).change),
+
       paidAt: doc.paidAt ?? null,
       paidDateKey: doc.paidDateKey ?? null,
 

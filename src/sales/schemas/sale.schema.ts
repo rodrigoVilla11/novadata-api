@@ -75,6 +75,9 @@ export class Sale {
   @Prop({ type: Number, default: 0, min: 0 })
   paidTotal: number;
 
+  @Prop({ type: Number, default: 0, min: 0 })
+  change: number;
+
   @Prop({ type: Date, default: null })
   paidAt?: Date | null;
 

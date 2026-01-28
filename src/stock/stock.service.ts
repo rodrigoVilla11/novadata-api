@@ -48,7 +48,7 @@ type ApplySaleInput = {
 type ApplyManualInput = {
   branchId: string; // ✅ NUEVO
   dateKey: string;
-  type: StockMovementType; // IN | OUT | ADJUST
+  type: StockMovementType; // IN | OUT | ADJUST | REVERSAL (según tu enum real)
   reason: StockMovementReason; // PURCHASE | MANUAL | WASTE | etc.
   refType?: string | null; // por ej "PURCHASE", "ADJUSTMENT"
   refId?: string | null; // ObjectId string (si querés idempotencia)
@@ -79,6 +79,22 @@ type StockAlertRow = {
   qty: number | null;
   minQty: number | null;
   status: 'LOW' | 'NO_COUNT';
+};
+
+export type NegativeStockLine = {
+  ingredientId: string;
+  unit: Unit;
+  prevOnHand: number;
+  nextOnHand: number;
+  delta: number; // negativo (resta)
+};
+
+export type ApplySaleResult = {
+  ok: boolean;
+  created: number;
+  items: Array<{ ingredientId: string; unit: Unit; qty: number }>;
+  idempotent: boolean;
+  negativeLines: NegativeStockLine[];
 };
 
 @Injectable()
@@ -129,14 +145,17 @@ export class StockService {
 
   /**
    * Core: aplica UN movimiento por ingrediente (1 item) en transacción:
-   * - update Ingredient.stock
+   * - update Ingredient.stock (por branch)
    * - insert StockMovement con qtyAfter
    *
-   * Si dedupeKey ya existe => aborta y NO toca stock (rollback).
+   * Si dedupeKey ya existe => lanza "Duplicate movement (already applied)"
+   * (caller lo trata como idempotente).
+   *
+   * ✅ Ahora devuelve prev/next para poder detectar stock negativo sin bloquear.
    */
   private async applyOneMovementTx(args: {
     session: any;
-    branchId: Types.ObjectId; // ✅ NUEVO
+    branchId: Types.ObjectId; // ✅
     dateKey: string;
     ingredientId: Types.ObjectId;
     unit: Unit;
@@ -149,8 +168,35 @@ export class StockService {
     createdByUserId?: Types.ObjectId | null;
     dedupeKey?: string | null;
     forbidNegative?: boolean; // default true
-  }) {
+  }): Promise<{
+    prevOnHand: number;
+    nextOnHand: number;
+    onHandAfter: number;
+  }> {
     const forbidNegative = args.forbidNegative ?? true;
+
+    // 0) leer onHand previo (dentro de la tx)
+    const beforeDoc = await this.ingredientModel
+      .findOne(
+        {
+          _id: args.ingredientId,
+          branchId: args.branchId,
+        } as any,
+        { stock: 1 } as any,
+      )
+      .session(args.session)
+      .lean();
+
+    if (!beforeDoc) {
+      throw new NotFoundException(
+        `Ingredient not found in branch: ingredient=${String(
+          args.ingredientId,
+        )}`,
+      );
+    }
+
+    const prevOnHand = num((beforeDoc as any).stock?.onHand);
+    const trackStock = !!(beforeDoc as any).stock?.trackStock;
 
     // 1) update stock actual (✅ por branch)
     const inc: any = { 'stock.onHand': args.qtyDelta };
@@ -160,7 +206,6 @@ export class StockService {
     const updated = await this.ingredientModel.findOneAndUpdate(
       {
         _id: args.ingredientId,
-        // ✅ IMPORTANTE: Ingredient debe tener branchId
         branchId: args.branchId,
       } as any,
       {
@@ -182,15 +227,12 @@ export class StockService {
       );
 
     const onHandAfter = num((updated as any).stock?.onHand);
-    if (
-      forbidNegative &&
-      (updated as any).stock?.trackStock &&
-      onHandAfter < 0
-    ) {
-      const onHandBefore = onHandAfter - num(args.qtyDelta);
+    const nextOnHand = onHandAfter;
+
+    if (forbidNegative && trackStock && onHandAfter < 0) {
       throw new BadRequestException(
         `Stock negativo no permitido: ingredient=${String(args.ingredientId)} ` +
-          `before=${onHandBefore} delta=${args.qtyDelta} after=${onHandAfter} ` +
+          `before=${prevOnHand} delta=${args.qtyDelta} after=${onHandAfter} ` +
           `unit=${args.unit} baseUnit=${String((updated as any).baseUnit ?? '')}`,
       );
     }
@@ -200,7 +242,7 @@ export class StockService {
       await this.movementModel.create(
         [
           {
-            branchId: args.branchId, // ✅
+            branchId: args.branchId,
             dateKey: args.dateKey,
             ingredientId: args.ingredientId,
             unit: args.unit,
@@ -224,14 +266,16 @@ export class StockService {
       throw e;
     }
 
-    return { onHandAfter };
+    return { prevOnHand, nextOnHand, onHandAfter };
   }
 
   /**
    * Venta => OUT de ingredientes por receta
    * Idempotencia: dedupeKey = SALE:<saleId>:<ingredientId>:<unit>:OUT
+   *
+   * ✅ Permite stock negativo, pero devuelve negativeLines para avisar.
    */
-  async applySale(dto: ApplySaleInput) {
+  async applySale(dto: ApplySaleInput): Promise<ApplySaleResult> {
     assertDateKey(dto.dateKey);
 
     const branchObjId = this.assertBranchId(dto.branchId);
@@ -296,6 +340,7 @@ export class StockService {
           unit: Unit;
           qty: number;
         }> = [];
+        const negativeLines: NegativeStockLine[] = [];
         let created = 0;
 
         for (const it of items) {
@@ -311,9 +356,9 @@ export class StockService {
           ]);
 
           try {
-            await this.applyOneMovementTx({
+            const bal = await this.applyOneMovementTx({
               session,
-              branchId: branchObjId, // ✅
+              branchId: branchObjId,
               dateKey: dto.dateKey,
               ingredientId: ingObjId,
               unit: it.unit,
@@ -325,9 +370,20 @@ export class StockService {
               note: dto.note ?? null,
               createdByUserId: userObjId,
               dedupeKey,
+              forbidNegative: false, // ✅ PERMITIR NEGATIVO EN VENTA
             });
 
             created += 1;
+
+            if (Number.isFinite(bal.nextOnHand) && bal.nextOnHand < 0) {
+              negativeLines.push({
+                ingredientId: String(ingObjId),
+                unit: it.unit,
+                prevOnHand: num(bal.prevOnHand),
+                nextOnHand: num(bal.nextOnHand),
+                delta: num(qtyDelta),
+              });
+            }
           } catch (e: any) {
             const msg = String(e?.message ?? '');
             const code = e?.code;
@@ -345,7 +401,7 @@ export class StockService {
           });
         }
 
-        return { created, outItems };
+        return { created, outItems, negativeLines };
       });
 
       return {
@@ -353,6 +409,7 @@ export class StockService {
         created: result?.created ?? 0,
         items: result?.outItems ?? [],
         idempotent: (result?.created ?? 0) === 0,
+        negativeLines: result?.negativeLines ?? [],
       };
     } finally {
       session.endSession();
@@ -361,6 +418,7 @@ export class StockService {
 
   /**
    * Manual (compras/merma/ajuste/etc.)
+   * (por default: forbidNegative=true)
    */
   async applyManual(input: ApplyManualInput) {
     assertDateKey(input.dateKey);
@@ -442,7 +500,7 @@ export class StockService {
 
           await this.applyOneMovementTx({
             session,
-            branchId: branchObjId, // ✅
+            branchId: branchObjId,
             dateKey: input.dateKey,
             ingredientId: ingObjId,
             unit,
@@ -454,6 +512,7 @@ export class StockService {
             note: it.note ?? input.note ?? null,
             createdByUserId: userObjId,
             dedupeKey,
+            // forbidNegative: true (default)
           });
 
           created += 1;
@@ -541,7 +600,7 @@ export class StockService {
 
           await this.applyOneMovementTx({
             session,
-            branchId: branchObjId, // ✅
+            branchId: branchObjId,
             dateKey: dto.dateKey,
             ingredientId: ingObjId,
             unit: it.unit,
@@ -553,6 +612,7 @@ export class StockService {
             note: dto.note ?? null,
             createdByUserId: userObjId,
             dedupeKey,
+            // forbidNegative: true (default) (reversa suma, no debería negativizar)
           });
 
           count += 1;
@@ -668,7 +728,7 @@ export class StockService {
    */
   async applyPurchaseReceiveTx(input: {
     session: any;
-    branchId: Types.ObjectId; // ✅ NUEVO
+    branchId: Types.ObjectId; // ✅
     dateKey: string;
     purchaseOrderId: Types.ObjectId;
     ingredientId: Types.ObjectId;
@@ -687,7 +747,7 @@ export class StockService {
 
     await this.applyOneMovementTx({
       session: input.session,
-      branchId: input.branchId, // ✅
+      branchId: input.branchId,
       dateKey: input.dateKey,
       ingredientId: input.ingredientId,
       unit: input.unit,
@@ -709,8 +769,6 @@ export class StockService {
       throw new BadRequestException('dateKey inválido (YYYY-MM-DD)');
     }
 
-    // ✅ Tomamos todo desde Ingredient (rápido y consistente con tu nuevo stock)
-    // Ajustá nombres de campos según tu schema real
     const rows = await this.ingredientModel
       .find(
         {
@@ -736,11 +794,9 @@ export class StockService {
       const onHand = ing?.stock?.onHand;
       const minQty = ing?.stock?.minQty;
 
-      // NO_COUNT: trackStock true pero no hay conteo/carga
       const noCount =
         onHand === null || onHand === undefined || Number.isNaN(Number(onHand));
 
-      // LOW: hay conteo y está por debajo del mínimo (minQty definido)
       const low =
         !noCount &&
         minQty !== null &&

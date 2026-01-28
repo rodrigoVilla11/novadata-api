@@ -65,6 +65,7 @@ export class OrdersController {
   @Roles('ADMIN', 'MANAGER', 'CASHIER')
   findAll(
     @Req() req: any,
+    @Query('dateKey') dateKey?: string,
     @Query('status') status?: OrderStatus,
     @Query('source') source?: 'POS' | 'ONLINE',
     @Query('fulfillment') fulfillment?: OrderFulfillment,
@@ -78,6 +79,7 @@ export class OrdersController {
     return this.ordersService.findAll({
       branchId,
       status,
+      dateKey,
       source,
       fulfillment,
       customerId,
@@ -147,15 +149,13 @@ export class OrdersController {
     @Param('id') id: string,
     @Body()
     body: {
-      customerSnapshot:
-        | {
-            name?: string | null;
-            phone?: string | null;
-            addressLine1?: string | null;
-            addressLine2?: string | null;
-            notes?: string | null;
-          }
-        | null;
+      customerSnapshot: {
+        name?: string | null;
+        phone?: string | null;
+        addressLine1?: string | null;
+        addressLine2?: string | null;
+        notes?: string | null;
+      } | null;
     },
   ) {
     const branchId = pickBranchId(req);

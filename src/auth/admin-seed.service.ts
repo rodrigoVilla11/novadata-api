@@ -28,7 +28,5 @@ export class AdminSeedService implements OnModuleInit {
       username: 'Superadmin',
     });
 
-    // Evitá loguear password
-    console.log(`✅ Seed SUPERADMIN created: ${email}`);
   }
 }

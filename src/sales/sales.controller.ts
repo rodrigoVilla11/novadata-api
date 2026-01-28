@@ -23,19 +23,7 @@ function getBranchIdOrThrow(req: any) {
   const branchId =
     u?.branchId ?? u?.branch_id ?? u?.branch?.id ?? u?.branch?.id ?? null;
 
-  // DEBUG (temporal)
-  // eslint-disable-next-line no-console
-  console.log('[Sales] req.user keys:', u ? Object.keys(u) : null);
-  // eslint-disable-next-line no-console
-  console.log('[Sales] req.user:', u);
-
   if (!branchId || String(branchId).trim() === '') {
-    // eslint-disable-next-line no-console
-    console.log(
-      '[Sales] Missing branchId. auth header:',
-      req?.headers?.authorization,
-    );
-
     throw new BadRequestException(
       'branchId inválido (missing/empty in req.user). ' +
         'Expected req.user.branchId (JWT payload).',
@@ -63,12 +51,14 @@ export class SalesController {
   /**
    * GET /sales?status=&from=&to=&limit=
    */
+  // SalesController (GET /sales)
   @Get()
   findAll(
     @Req() req: any,
     @Query('status') status?: SaleStatus,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('dateKey') dateKey?: string, // ✅ nuevo
     @Query('limit') limit?: string,
   ) {
     const branchId = getBranchIdOrThrow(req);
@@ -76,6 +66,7 @@ export class SalesController {
       status,
       from,
       to,
+      dateKey, // ✅ nuevo
       limit: limit ? Number(limit) : undefined,
     });
   }

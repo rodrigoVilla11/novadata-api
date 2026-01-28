@@ -8,6 +8,16 @@ import { Model, Types } from 'mongoose';
 
 import { Order, OrderFulfillment, OrderStatus } from './schemas/order.schema';
 import { Product } from 'src/products/schemas/product.schema';
+import {
+  OrderCounter,
+  OrderCounterDocument,
+} from './schemas/order-counter.schema';
+
+function todayKeyAR(d = new Date()) {
+  // YYYY-MM-DD en Argentina (UTC-3)
+  const x = new Date(d.getTime() - 3 * 60 * 60 * 1000);
+  return x.toISOString().slice(0, 10);
+}
 
 function num(v: any) {
   const n = Number(v ?? 0);
@@ -32,6 +42,8 @@ export class OrdersService {
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<Order>,
     @InjectModel(Product.name) private readonly productModel: Model<Product>,
+    @InjectModel(OrderCounter.name)
+    private readonly counterModel: Model<OrderCounterDocument>,
   ) {}
 
   // ============================
@@ -52,6 +64,18 @@ export class OrdersService {
     if (!Types.ObjectId.isValid(s))
       throw new BadRequestException(`${name} must be a valid ObjectId`);
     return new Types.ObjectId(s);
+  }
+
+  private async nextDayNumber(branchId: string, dateKey: string) {
+    const branchObjId = this.oidOrThrow(branchId, 'branchId');
+
+    const counter = await this.counterModel.findOneAndUpdate(
+      { branchId: branchObjId, dateKey },
+      { $inc: { seq: 1 } },
+      { new: true, upsert: true },
+    );
+
+    return Number(counter.seq); // 1..N
   }
 
   // ============================
@@ -109,9 +133,13 @@ export class OrdersService {
         );
       }
     }
+    const dateKey = todayKeyAR(); // o si lo querés parametrizable, lo pasás en input
+    const dayNumber = await this.nextDayNumber(input.branchId, dateKey);
 
     const doc = await this.orderModel.create({
       branchId: branchObjId,
+      dateKey,
+      dayNumber,
       status: initialStatus,
       source,
       fulfillment,
@@ -131,6 +159,7 @@ export class OrdersService {
 
   async findAll(params: {
     branchId: string; // ✅ requerido
+    dateKey?: string;
     status?: OrderStatus;
     source?: 'POS' | 'ONLINE';
     fulfillment?: OrderFulfillment;
@@ -152,9 +181,22 @@ export class OrdersService {
 
     if (params?.q?.trim()) {
       const q = params.q.trim();
-      // soporta buscar por _id si es ObjectId
       if (Types.ObjectId.isValid(q)) filter._id = new Types.ObjectId(q);
-      else filter._id = q; // si usás ids string (raro), lo deja
+      else filter._id = q;
+    }
+
+    // ✅ FILTRO POR DÍA (dateKey)
+    if (params?.dateKey) {
+      const dk = String(params.dateKey).trim();
+
+      // Día completo en horario Argentina
+      const fromDay = new Date(`${dk}T00:00:00-03:00`);
+      const toDay = new Date(`${dk}T23:59:59.999-03:00`);
+
+      filter.createdAt = {
+        $gte: fromDay,
+        $lte: toDay,
+      };
     }
 
     const limit = Math.min(200, Math.max(1, Number(params?.limit ?? 50)));
@@ -192,7 +234,10 @@ export class OrdersService {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const orderObjId = this.oidOrThrow(orderId, 'orderId');
 
-    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
+    const doc = await this.orderModel.findOne({
+      _id: orderObjId,
+      branchId: branchObjId,
+    });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -220,7 +265,10 @@ export class OrdersService {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const orderObjId = this.oidOrThrow(orderId, 'orderId');
 
-    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
+    const doc = await this.orderModel.findOne({
+      _id: orderObjId,
+      branchId: branchObjId,
+    });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -272,7 +320,10 @@ export class OrdersService {
     if (!Array.isArray(items))
       throw new BadRequestException('items[] is required');
 
-    const existing = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
+    const existing = await this.orderModel.findOne({
+      _id: orderObjId,
+      branchId: branchObjId,
+    });
     if (!existing) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(existing.status)) {
@@ -296,7 +347,10 @@ export class OrdersService {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const orderObjId = this.oidOrThrow(orderId, 'orderId');
 
-    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
+    const doc = await this.orderModel.findOne({
+      _id: orderObjId,
+      branchId: branchObjId,
+    });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -318,7 +372,10 @@ export class OrdersService {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const orderObjId = this.oidOrThrow(orderId, 'orderId');
 
-    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
+    const doc = await this.orderModel.findOne({
+      _id: orderObjId,
+      branchId: branchObjId,
+    });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -350,7 +407,10 @@ export class OrdersService {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const orderObjId = this.oidOrThrow(orderId, 'orderId');
 
-    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
+    const doc = await this.orderModel.findOne({
+      _id: orderObjId,
+      branchId: branchObjId,
+    });
     if (!doc) throw new NotFoundException('Order not found');
 
     if (![OrderStatus.DRAFT, OrderStatus.PENDING].includes(doc.status)) {
@@ -371,7 +431,10 @@ export class OrdersService {
     const branchObjId = this.oidOrThrow(branchId, 'branchId');
     const orderObjId = this.oidOrThrow(orderId, 'orderId');
 
-    const doc = await this.orderModel.findOne({ _id: orderObjId, branchId: branchObjId });
+    const doc = await this.orderModel.findOne({
+      _id: orderObjId,
+      branchId: branchObjId,
+    });
     if (!doc) throw new NotFoundException('Order not found');
 
     if ([OrderStatus.ACCEPTED, OrderStatus.REJECTED].includes(doc.status)) {
@@ -404,8 +467,7 @@ export class OrdersService {
 
     for (const it of rawItems) {
       const productId = String(it.productId ?? '').trim();
-      if (!productId)
-        throw new BadRequestException('productId is required');
+      if (!productId) throw new BadRequestException('productId is required');
       if (!Types.ObjectId.isValid(productId))
         throw new BadRequestException('productId must be a valid ObjectId');
 
@@ -414,7 +476,8 @@ export class OrdersService {
         throw new BadRequestException('qty must be > 0');
 
       const prev = merged.get(productId);
-      if (!prev) merged.set(productId, { productId, qty, note: it.note ?? null });
+      if (!prev)
+        merged.set(productId, { productId, qty, note: it.note ?? null });
       else prev.qty += qty;
     }
 
@@ -452,7 +515,9 @@ export class OrdersService {
 
       const unitPrice = salePrice ?? suggested ?? 0;
       if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-        throw new BadRequestException(`Invalid price for product ${it.productId}`);
+        throw new BadRequestException(
+          `Invalid price for product ${it.productId}`,
+        );
       }
 
       const qty = num(it.qty);
@@ -460,6 +525,7 @@ export class OrdersService {
 
       built.push({
         productId: new Types.ObjectId(it.productId),
+        name: String(p.name ?? '').trim() || null, // ✅ acá
         qty,
         unitPrice,
         lineTotal,
@@ -479,36 +545,28 @@ export class OrdersService {
   private toDto(doc: any) {
     return {
       id: String(doc._id ?? doc.id),
-
-      branchId: doc.branchId ? String(doc.branchId) : null,
+      // ✅ ESTO
+      dateKey: doc.dateKey ?? null,
+      dayNumber: typeof doc.dayNumber === 'number' ? doc.dayNumber : null,
 
       status: doc.status,
       source: doc.source,
       fulfillment: doc.fulfillment,
-
+      total: num(doc.total),
+      subtotal: num(doc.subtotal),
       customerId: doc.customerId ? String(doc.customerId) : null,
       customerSnapshot: doc.customerSnapshot ?? null,
-
       note: doc.note ?? null,
-      rejectionReason: doc.rejectionReason ?? null,
-
-      subtotal: num(doc.subtotal),
-      total: num(doc.total),
-
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
       items: (doc.items ?? []).map((it: any) => ({
         productId: it.productId ? String(it.productId) : null,
         qty: num(it.qty),
         unitPrice: num(it.unitPrice),
         lineTotal: num(it.lineTotal),
         note: it.note ?? null,
+        name: it.name ?? undefined,
       })),
-
-      acceptedAt: doc.acceptedAt ?? null,
-      rejectedAt: doc.rejectedAt ?? null,
-      cancelledAt: doc.cancelledAt ?? null,
-
-      createdAt: doc.createdAt,
-      updatedAt: doc.updatedAt,
     };
   }
 }

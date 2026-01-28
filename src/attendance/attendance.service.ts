@@ -165,12 +165,6 @@ export class AttendanceService {
     const branchId = toObjectId(input.branchId, 'branchId');
     const dateKey = normalizeDateKey(input.dateKey);
     const employeeId = toObjectId(input.employeeId, 'employeeId');
-    console.log('Attendance collection:', this.attendanceModel.collection.name);
-    console.log(
-      'Schema has branchId:',
-      !!this.attendanceModel.schema.path('branchId'),
-    );
-    console.log('Resolved branchId (ObjectId):', String(branchId));
 
     await this.assertEmployeeInBranch(employeeId, branchId);
 
