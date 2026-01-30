@@ -12,6 +12,7 @@ import { Unit } from 'src/ingredients/enums/unit.enum';
 import { RecipeService } from 'src/recipes/recipe.service';
 import { StockMovement } from './schemas/stock-movement.schema';
 import { StockMovementReason, StockMovementType } from './enums/stock.enums';
+import { CombosService } from 'src/combos/combos.service';
 
 function num(v: any) {
   const n = Number(v ?? 0);
@@ -37,12 +38,29 @@ type ApplyMovementItem = {
 };
 
 type ApplySaleInput = {
-  branchId: string; // ✅ NUEVO (viene del JWT en controller)
-  dateKey: string; // YYYY-MM-DD
-  saleId: string; // ObjectId string
-  lines: Array<{ productId: string; qty: number }>;
+  branchId: string;
+  dateKey: string;
+  saleId: string;
+  lines: Array<
+    | { type?: 'PRODUCT'; productId: string; qty: number }
+    | { type: 'COMBO'; comboId: string; qty: number }
+  >;
+  // ✅ ahora soporta comboId
   note?: string | null;
-  userId?: string | null; // auditoría
+  userId?: string | null;
+};
+
+type ApplySaleReversalInput = {
+  branchId: string;
+  dateKey: string;
+  saleId: string;
+  lines: Array<
+    | { type?: 'PRODUCT'; productId: string; qty: number }
+    | { type: 'COMBO'; comboId: string; qty: number }
+  >;
+  // ✅ ahora soporta comboId
+  note?: string | null;
+  userId?: string | null;
 };
 
 type ApplyManualInput = {
@@ -53,15 +71,6 @@ type ApplyManualInput = {
   refType?: string | null; // por ej "PURCHASE", "ADJUSTMENT"
   refId?: string | null; // ObjectId string (si querés idempotencia)
   items: ApplyMovementItem[];
-  note?: string | null;
-  userId?: string | null;
-};
-
-type ApplySaleReversalInput = {
-  branchId: string; // ✅ NUEVO
-  dateKey: string;
-  saleId: string; // ObjectId string
-  lines: Array<{ productId: string; qty: number }>;
   note?: string | null;
   userId?: string | null;
 };
@@ -105,9 +114,65 @@ export class StockService {
     @InjectModel(Ingredient.name)
     private readonly ingredientModel: Model<Ingredient>,
     private readonly recipeService: RecipeService,
+    private readonly combosService: CombosService,
     @InjectConnection()
     private readonly conn: Connection,
   ) {}
+
+  private async expandSaleLinesToProducts(dto: {
+    branchId: string;
+    lines: Array<{ productId?: string; comboId?: string; qty: number }>;
+  }) {
+    const out: Array<{ productId: string; qty: number }> = [];
+
+    for (const line of dto.lines) {
+      const qty = num(line.qty);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new BadRequestException('line.qty must be > 0');
+      }
+
+      const productId = String(line.productId ?? '').trim();
+      const comboId = String(line.comboId ?? '').trim();
+
+      // Compat: si vienen ambos, priorizamos combo (pero podés invertirlo)
+      if (comboId) {
+        const expanded = await this.combosService.expandComboToProducts(
+          dto.branchId,
+          comboId,
+          qty,
+        );
+
+        if (!Array.isArray(expanded) || expanded.length === 0) {
+          throw new BadRequestException(
+            `Combo has no products: comboId=${comboId}`,
+          );
+        }
+
+        for (const p of expanded) {
+          const pid = String(p.productId ?? '').trim();
+          const pq = num(p.qty);
+          if (!pid)
+            throw new BadRequestException('combo productId is required');
+          if (!Number.isFinite(pq) || pq <= 0)
+            throw new BadRequestException('combo product qty must be > 0');
+          out.push({ productId: pid, qty: pq });
+        }
+
+        continue;
+      }
+
+      if (productId) {
+        out.push({ productId, qty });
+        continue;
+      }
+
+      throw new BadRequestException(
+        'line.productId or line.comboId is required',
+      );
+    }
+
+    return out;
+  }
 
   private oidOrThrow(id: string, label: string) {
     const s = String(id ?? '').trim();
@@ -286,22 +351,79 @@ export class StockService {
       throw new BadRequestException('lines[] is required');
     }
 
-    // Expandir productos -> ingredientes y acumular
+    // ===========================================================================
+    // 1) Expandir líneas (PRODUCT/COMBO) -> productos acumulados
+    // ===========================================================================
+    const productAcc = new Map<string, number>(); // productId -> qty
+
+    for (const lineAny of dto.lines as any[]) {
+      const qty = num(lineAny?.qty);
+
+      const type = String(lineAny?.type || 'PRODUCT').toUpperCase();
+
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new BadRequestException('line.qty must be > 0');
+      }
+
+      if (type === 'COMBO') {
+        const comboId = String(lineAny?.comboId || '').trim();
+        if (!comboId || !Types.ObjectId.isValid(comboId)) {
+          throw new BadRequestException(
+            'line.comboId must be a valid ObjectId',
+          );
+        }
+
+        // ✅ combo -> productos
+        const expandedProducts = await this.combosService.expandComboToProducts(
+          dto.branchId,
+          comboId,
+          qty,
+          { onlyIfActiveNow: false },
+        );
+
+        if (!Array.isArray(expandedProducts) || expandedProducts.length === 0) {
+          throw new BadRequestException(
+            `Combo expansion returned no products: comboId=${comboId}`,
+          );
+        }
+
+        for (const p of expandedProducts as any[]) {
+          const pid = String(p?.productId || '').trim();
+          const pq = num(p?.qty);
+
+          if (!pid || !Types.ObjectId.isValid(pid)) continue;
+          if (!Number.isFinite(pq) || pq <= 0) continue;
+
+          productAcc.set(pid, (productAcc.get(pid) ?? 0) + pq);
+        }
+
+        continue;
+      }
+
+      // PRODUCT (default)
+      const productId = String(lineAny?.productId || '').trim();
+      if (!productId || !Types.ObjectId.isValid(productId)) {
+        throw new BadRequestException(
+          'line.productId must be a valid ObjectId',
+        );
+      }
+
+      productAcc.set(productId, (productAcc.get(productId) ?? 0) + qty);
+    }
+
+    if (!productAcc.size) {
+      throw new BadRequestException('No products computed from sale lines');
+    }
+
+    // ===========================================================================
+    // 2) Expandir productos -> ingredientes (y acumular por ingredientId+unit)
+    // ===========================================================================
     const acc = new Map<
       string,
       { ingredientId: string; unit: Unit; qty: number }
     >();
 
-    for (const line of dto.lines) {
-      const productId = String(line.productId || '').trim();
-      const qty = num(line.qty);
-
-      if (!productId)
-        throw new BadRequestException('line.productId is required');
-      if (!Number.isFinite(qty) || qty <= 0) {
-        throw new BadRequestException('line.qty must be > 0');
-      }
-
+    for (const [productId, qty] of productAcc.entries()) {
       const expanded = await this.recipeService.expandProductToIngredients(
         productId,
         qty,
@@ -332,6 +454,9 @@ export class StockService {
       );
     }
 
+    // ===========================================================================
+    // 3) Aplicar OUT por ingrediente (tx + idempotencia)
+    // ===========================================================================
     const session = await this.conn.startSession();
     try {
       const result = await session.withTransaction(async () => {
@@ -381,7 +506,7 @@ export class StockService {
                 unit: it.unit,
                 prevOnHand: num(bal.prevOnHand),
                 nextOnHand: num(bal.nextOnHand),
-                delta: num(qtyDelta),
+                delta: num(qtyDelta), // negativo
               });
             }
           } catch (e: any) {
@@ -541,20 +666,77 @@ export class StockService {
       throw new BadRequestException('lines[] is required');
     }
 
+    // ===========================================================================
+    // 1) Expandir líneas (PRODUCT/COMBO) -> productos acumulados
+    // ===========================================================================
+    const productAcc = new Map<string, number>(); // productId -> qty
+
+    for (const lineAny of dto.lines as any[]) {
+      const qty = num(lineAny?.qty);
+      const type = String(lineAny?.type || 'PRODUCT').toUpperCase();
+
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new BadRequestException('line.qty must be > 0');
+      }
+
+      if (type === 'COMBO') {
+        const comboId = String(lineAny?.comboId || '').trim();
+        if (!comboId || !Types.ObjectId.isValid(comboId)) {
+          throw new BadRequestException(
+            'line.comboId must be a valid ObjectId',
+          );
+        }
+
+        const expandedProducts = await this.combosService.expandComboToProducts(
+          dto.branchId,
+          comboId,
+          qty,
+          { onlyIfActiveNow: false },
+        );
+
+        if (!Array.isArray(expandedProducts) || expandedProducts.length === 0) {
+          throw new BadRequestException(
+            `Combo expansion returned no products: comboId=${comboId}`,
+          );
+        }
+
+        for (const p of expandedProducts as any[]) {
+          const pid = String(p?.productId || '').trim();
+          const pq = num(p?.qty);
+
+          if (!pid || !Types.ObjectId.isValid(pid)) continue;
+          if (!Number.isFinite(pq) || pq <= 0) continue;
+
+          productAcc.set(pid, (productAcc.get(pid) ?? 0) + pq);
+        }
+
+        continue;
+      }
+
+      // PRODUCT (default)
+      const productId = String(lineAny?.productId || '').trim();
+      if (!productId || !Types.ObjectId.isValid(productId)) {
+        throw new BadRequestException(
+          'line.productId must be a valid ObjectId',
+        );
+      }
+
+      productAcc.set(productId, (productAcc.get(productId) ?? 0) + qty);
+    }
+
+    if (!productAcc.size) {
+      throw new BadRequestException('No products computed from sale lines');
+    }
+
+    // ===========================================================================
+    // 2) Expandir productos -> ingredientes (acumular)
+    // ===========================================================================
     const acc = new Map<
       string,
       { ingredientId: string; unit: Unit; qty: number }
     >();
 
-    for (const line of dto.lines) {
-      const productId = String(line.productId || '').trim();
-      const qty = num(line.qty);
-
-      if (!productId)
-        throw new BadRequestException('line.productId is required');
-      if (!Number.isFinite(qty) || qty <= 0)
-        throw new BadRequestException('line.qty must be > 0');
-
+    for (const [productId, qty] of productAcc.entries()) {
       const expanded = await this.recipeService.expandProductToIngredients(
         productId,
         qty,
@@ -563,13 +745,15 @@ export class StockService {
       for (const it of expanded.items) {
         const key = `${it.ingredientId}::${it.unit}`;
         const prev = acc.get(key);
-        if (!prev)
+        if (!prev) {
           acc.set(key, {
             ingredientId: it.ingredientId,
             unit: it.unit,
             qty: it.qty,
           });
-        else prev.qty += it.qty;
+        } else {
+          prev.qty += it.qty;
+        }
       }
     }
 
@@ -581,6 +765,9 @@ export class StockService {
       throw new BadRequestException('No ingredient restore computed');
     }
 
+    // ===========================================================================
+    // 3) Aplicar REVERSAL (+qty) por ingrediente (tx + idempotencia)
+    // ===========================================================================
     const session = await this.conn.startSession();
     try {
       const created = await session.withTransaction(async () => {
@@ -612,7 +799,7 @@ export class StockService {
             note: dto.note ?? null,
             createdByUserId: userObjId,
             dedupeKey,
-            // forbidNegative: true (default) (reversa suma, no debería negativizar)
+            // forbidNegative: true (default)
           });
 
           count += 1;

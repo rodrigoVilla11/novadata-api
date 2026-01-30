@@ -12,10 +12,24 @@ export enum SaleStatus {
 
 export type SaleSource = 'POS' | 'ONLINE';
 
+export enum SaleItemType {
+  PRODUCT = 'PRODUCT',
+  COMBO = 'COMBO',
+}
+
 @Schema({ _id: false })
 export class SaleItem {
-  @Prop({ type: Types.ObjectId, ref: 'Product', required: true, index: true })
-  productId: Types.ObjectId;
+  // ✅ nuevo: tipo del item
+  @Prop({ type: String, enum: SaleItemType, required: true, default: SaleItemType.PRODUCT })
+  type: SaleItemType;
+
+  // ✅ retro-compat: ventas viejas van a seguir trayendo productId
+  @Prop({ type: Types.ObjectId, ref: 'Product', default: null, index: true })
+  productId?: Types.ObjectId | null;
+
+  // ✅ nuevo: comboId
+  @Prop({ type: Types.ObjectId, ref: 'Combo', default: null, index: true })
+  comboId?: Types.ObjectId | null;
 
   @Prop({ type: Number, required: true, min: 0 })
   qty: number;
@@ -29,6 +43,7 @@ export class SaleItem {
   @Prop({ type: String, trim: true, default: null })
   note?: string | null;
 }
+
 
 @Schema({ _id: false })
 export class SalePayment {
@@ -117,3 +132,6 @@ SaleSchema.index(
     partialFilterExpression: { orderId: { $type: 'objectId' } },
   },
 );
+SaleSchema.index({ branchId: 1, 'items.type': 1 });
+SaleSchema.index({ branchId: 1, 'items.productId': 1 });
+SaleSchema.index({ branchId: 1, 'items.comboId': 1 });

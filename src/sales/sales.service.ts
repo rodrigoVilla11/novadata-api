@@ -346,7 +346,9 @@ export class SalesService {
         userId: pickUserId(user) ? String(pickUserId(user)) : null,
         note: dto.note ?? null,
         lines: (sale0.items ?? []).map((it: any) => ({
-          productId: String(it.productId),
+          type: it.type === 'COMBO' ? 'COMBO' : 'PRODUCT',
+          productId: it.productId ? String(it.productId) : undefined,
+          comboId: it.comboId ? String(it.comboId) : undefined,
           qty: Number(it.qty ?? 0),
         })),
       } as any);
