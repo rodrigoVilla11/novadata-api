@@ -9,6 +9,7 @@ import { StockMovement, StockMovementSchema } from './schemas/stock-movement.sch
 
 import { Ingredient, IngredientSchema } from 'src/ingredients/schemas/ingredients.schema';
 import { RecipeModule } from 'src/recipes/recipe.module';
+import { CombosModule } from 'src/combos/combos.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { RecipeModule } from 'src/recipes/recipe.module';
       { name: Ingredient.name, schema: IngredientSchema },
     ]),
     RecipeModule, // ✅ para inyectar RecipeService
+    CombosModule
   ],
   controllers: [StockController],
   providers: [StockService],

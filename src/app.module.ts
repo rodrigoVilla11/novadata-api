@@ -30,6 +30,7 @@ import { FinanceStatsModule } from './finance/stats/finance-stats.module';
 import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
 import { BranchesModule } from './branches/branches.module';
 import { ScheduleModule } from '@nestjs/schedule';
+import { CombosModule } from './combos/combos.module';
 
 @Module({
   imports: [
@@ -70,6 +71,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     FinanceStatsModule,
     PurchaseOrdersModule,
     BranchesModule,
+    CombosModule
   ],
 })
 export class AppModule {}
