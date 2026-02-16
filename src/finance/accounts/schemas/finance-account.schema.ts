@@ -1,12 +1,12 @@
-import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
-import { Document, Types } from "mongoose";
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
 
 export type FinanceAccountDocument = FinanceAccount & Document;
 
 export enum FinanceAccountType {
-  CASH = "CASH",
-  BANK = "BANK",
-  WALLET = "WALLET",
+  CASH = 'CASH',
+  BANK = 'BANK',
+  WALLET = 'WALLET',
 }
 
 @Schema({ timestamps: true })
@@ -16,7 +16,7 @@ export class FinanceAccount {
    * ====================== */
   @Prop({
     type: Types.ObjectId,
-    ref: "Branch",
+    ref: 'Branch',
     required: true,
     index: true,
   })
@@ -33,7 +33,7 @@ export class FinanceAccount {
   @Prop({ required: true, enum: FinanceAccountType, index: true })
   type!: FinanceAccountType;
 
-  @Prop({ default: "ARS" })
+  @Prop({ default: 'ARS' })
   currency!: string;
 
   @Prop({ default: 0 })
@@ -58,3 +58,14 @@ export class FinanceAccount {
 
 export const FinanceAccountSchema =
   SchemaFactory.createForClass(FinanceAccount);
+
+FinanceAccountSchema.index(
+  { branchId: 1, code: 1 },
+  { unique: true, partialFilterExpression: { deletedAt: null } },
+);
+FinanceAccountSchema.index(
+  { branchId: 1, name: 1 },
+  { unique: true, partialFilterExpression: { deletedAt: null } },
+);
+FinanceAccountSchema.index({ branchId: 1, deletedAt: 1, isActive: 1 });
+FinanceAccountSchema.index({ branchId: 1, type: 1, deletedAt: 1 });
